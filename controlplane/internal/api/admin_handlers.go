@@ -1,0 +1,204 @@
+package api
+
+import (
+	"net/http"
+
+	"openflux-control/internal/auth"
+	"openflux-control/internal/store"
+)
+
+type createNodeRequest struct {
+	Name    string `json:"name"`
+	MaxKeys int    `json:"max_keys"`
+}
+
+type createNodeResponse struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	MaxKeys int    `json:"max_keys"`
+	Token   string `json:"token"`
+}
+
+func (a *App) handleCreateNode(w http.ResponseWriter, r *http.Request) {
+	var req createNodeRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.MaxKeys <= 0 {
+		req.MaxKeys = 500
+	}
+
+	token, err := auth.GenerateToken("node")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token generation failed")
+		return
+	}
+
+	n, err := a.Store.CreateNode(r.Context(), req.Name, a.Hasher.Hash(token), req.MaxKeys)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create node failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, createNodeResponse{ID: n.ID, Name: n.Name, MaxKeys: n.MaxKeys, Token: token})
+}
+
+func (a *App) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := a.Store.ListNodes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list nodes failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (a *App) handleRotateNodeToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	token, err := auth.GenerateToken("node")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token generation failed")
+		return
+	}
+
+	if err := a.Store.RotateNodeSecret(r.Context(), id, a.Hasher.Hash(token)); err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "rotate failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+type createIngestTokenRequest struct {
+	Label string `json:"label"`
+	Scope string `json:"scope"`
+}
+
+func (a *App) handleCreateIngestToken(w http.ResponseWriter, r *http.Request) {
+	var req createIngestTokenRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Scope == "" {
+		req.Scope = "keys:write"
+	}
+
+	token, err := auth.GenerateToken("ingest")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "token generation failed")
+		return
+	}
+
+	it, err := a.Store.CreateIngestToken(r.Context(), a.Hasher.Hash(token), req.Label, req.Scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create ingest token failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"id": it.ID, "label": it.Label, "scope": it.Scope, "token": token,
+	})
+}
+
+func (a *App) handleListIngestTokens(w http.ResponseWriter, r *http.Request) {
+	tokens, err := a.Store.ListIngestTokens(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list ingest tokens failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+func (a *App) handleSetIngestTokenEnabled(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := a.Store.SetIngestTokenEnabled(r.Context(), r.PathValue("id"), enabled); err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, "ingest token not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, "update ingest token failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+	}
+}
+
+func (a *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := a.Store.ListKeys(r.Context(), store.ListKeysFilter{OwnerRef: r.URL.Query().Get("owner_ref")})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list keys failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, keys)
+}
+
+func (a *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	createKeyHandler(a, w, r, "")
+}
+
+func (a *App) handleGetKey(w http.ResponseWriter, r *http.Request) {
+	k, err := a.Store.GetKeyByID(r.Context(), r.PathValue("id"))
+	if err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get key failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
+}
+
+type patchKeyRequest struct {
+	TrafficLimitBytes *int64 `json:"traffic_limit_bytes"`
+}
+
+func (a *App) handlePatchKey(w http.ResponseWriter, r *http.Request) {
+	var req patchKeyRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	if err := a.Store.SetKeyTrafficLimit(r.Context(), r.PathValue("id"), req.TrafficLimitBytes); err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "update key failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (a *App) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
+	if err := a.Store.DeleteKey(r.Context(), r.PathValue("id")); err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "delete key failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := a.Store.SetKeyEnabled(r.Context(), r.PathValue("id"), enabled); err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, "key not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, "update key failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+	}
+}

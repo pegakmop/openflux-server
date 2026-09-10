@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenFlux Control Plane</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1420;
+    --panel: #121e2e;
+    --panel-border: #1f3348;
+    --text: #e7eef7;
+    --muted: #8ba3bd;
+    --accent: #4fd1c5;
+    --accent-strong: #2fb7ab;
+    --danger: #f16a6a;
+    --danger-strong: #d94f4f;
+    --warn: #e2b93b;
+    --radius: 10px;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: 0.02em; }
+  header h1 span { color: var(--accent); }
+  main { max-width: 980px; margin: 0 auto; padding: 24px; }
+  .hidden { display: none !important; }
+
+  /* --- login --- */
+  #login-view {
+    max-width: 420px;
+    margin: 10vh auto 0;
+    padding: 28px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+  }
+  #login-view h2 { margin-top: 0; }
+  #login-view p { color: var(--muted); font-size: 13px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  input, select {
+    width: 100%;
+    padding: 9px 10px;
+    background: #0d1826;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--accent);
+    color: #06201d;
+  }
+  button:hover { background: var(--accent-strong); }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--panel-border); }
+  button.secondary:hover { background: #16283b; }
+  button.danger { background: var(--danger); color: #2b0a0a; }
+  button.danger:hover { background: var(--danger-strong); }
+  button.small { padding: 5px 10px; font-size: 12px; }
+  button + button { margin-left: 8px; }
+
+  /* --- tabs --- */
+  nav.tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--panel-border); }
+  nav.tabs button {
+    background: none; color: var(--muted); border-radius: 0;
+    padding: 10px 16px; font-weight: 600; border-bottom: 2px solid transparent;
+  }
+  nav.tabs button:hover { background: none; color: var(--text); }
+  nav.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 18px;
+  }
+  .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 160px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--panel-border); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.mono, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .table-scroll { overflow-x: auto; }
+  td.actions { white-space: nowrap; text-align: right; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.ok { background: rgba(79,209,197,.15); color: var(--accent); }
+  .badge.off { background: rgba(241,106,106,.15); color: var(--danger); }
+  .badge.warn { background: rgba(226,185,59,.15); color: var(--warn); }
+
+  .token-box {
+    display: flex; align-items: center; gap: 8px;
+    background: #0d1826; border: 1px dashed var(--accent);
+    border-radius: 6px; padding: 10px 12px; margin-top: 10px;
+  }
+  .token-box code { flex: 1; word-break: break-all; }
+
+  #toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    padding: 12px 16px; border-radius: 8px; font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+    opacity: 0; transform: translateY(8px); transition: all .2s ease;
+    pointer-events: none; max-width: 360px;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  #toast.error { border-color: var(--danger); color: var(--danger); }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Open<span>Flux</span> Control Plane</h1>
+  <button id="logout-btn" class="secondary hidden">Log out</button>
+</header>
+
+<div id="login-view">
+  <h2>Admin sign-in</h2>
+  <p>Paste the controlplane admin token (<code>CONTROLPLANE_ADMIN_TOKEN</code>). It's kept only in this browser's local storage.</p>
+  <label for="login-token">Admin token</label>
+  <input id="login-token" type="password" autocomplete="off" placeholder="admin token" />
+  <div style="margin-top:14px"><button id="login-btn">Sign in</button></div>
+</div>
+
+<main id="app-view" class="hidden">
+  <nav class="tabs">
+    <button data-tab="nodes" class="active">Nodes</button>
+    <button data-tab="keys">Keys</button>
+    <button data-tab="ingest">Ingest tokens</button>
+  </nav>
+
+  <section id="tab-nodes" class="tab active">
+    <div class="card">
+      <h3>Register a node</h3>
+      <div class="row">
+        <div><label for="node-name">Name</label><input id="node-name" placeholder="node-eu-1" /></div>
+        <div><label for="node-maxkeys">Max keys</label><input id="node-maxkeys" type="number" value="500" /></div>
+        <div><button id="node-create-btn">Create</button></div>
+      </div>
+      <div id="node-token-box"></div>
+    </div>
+    <div class="card">
+      <h3>Nodes</h3>
+      <div id="nodes-table"></div>
+    </div>
+  </section>
+
+  <section id="tab-keys" class="tab">
+    <div class="card">
+      <h3>Create a key</h3>
+      <div class="row">
+        <div><label for="key-label">Label</label><input id="key-label" placeholder="user-42" /></div>
+        <div><label for="key-docurl">Yandex Docs URL</label><input id="key-docurl" placeholder="https://docs.yandex.ru/..." /></div>
+        <div><label for="key-limit">Traffic limit (GB, blank = unlimited)</label><input id="key-limit" type="number" min="0" /></div>
+        <div><label for="key-owner">Owner ref (optional)</label><input id="key-owner" placeholder="customer-id" /></div>
+        <div><button id="key-create-btn">Create</button></div>
+      </div>
+      <div id="key-token-box"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:12px">
+        <h3 style="margin:0">Keys</h3>
+        <div style="max-width:220px"><input id="key-filter" placeholder="filter by owner_ref" /></div>
+        <div><button id="key-filter-btn" class="secondary small">Filter</button></div>
+      </div>
+      <div id="keys-table"></div>
+    </div>
+  </section>
+
+  <section id="tab-ingest" class="tab">
+    <div class="card">
+      <h3>Create an ingest token</h3>
+      <div class="row">
+        <div><label for="ingest-label">Label</label><input id="ingest-label" placeholder="key-gen-bot" /></div>
+        <div><button id="ingest-create-btn">Create</button></div>
+      </div>
+      <div id="ingest-token-box"></div>
+    </div>
+    <div class="card">
+      <h3>Ingest tokens</h3>
+      <div id="ingest-table"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "openflux_admin_token";
+
+  function getToken() { return localStorage.getItem(TOKEN_KEY); }
+  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+  function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+
+  var toastTimer = null;
+  function toast(message, isError) {
+    var el = document.getElementById("toast");
+    el.textContent = message;
+    el.className = isError ? "error show" : "show";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.className = ""; }, 4000);
+  }
+
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = { "Authorization": "Bearer " + getToken() };
+    if (opts.body) headers["Content-Type"] = "application/json";
+    return fetch(path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    }).then(function (resp) {
+      if (resp.status === 401) {
+        clearToken();
+        showLogin();
+        throw new Error("session expired");
+      }
+      if (resp.status === 204) return null;
+      return resp.json().catch(function () { return null; }).then(function (data) {
+        if (!resp.ok) {
+          var msg = (data && data.error) ? data.error : ("request failed (" + resp.status + ")");
+          throw new Error(msg);
+        }
+        return data;
+      });
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // Full IDs are UUIDs - too wide for a table column. Shows a short prefix
+  // (git-SHA style) with the full value in a tooltip and still selectable.
+  function shortId(id) {
+    var s = String(id || "");
+    return '<span class="mono" title="' + escapeHtml(s) + '">' + escapeHtml(s.slice(0, 8)) + "…</span>";
+  }
+
+  function formatBytes(n) {
+    if (n == null) return "—";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var v = Number(n), i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(1) + " " + units[i];
+  }
+
+  function formatDate(s) {
+    if (!s) return "—";
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? s : d.toLocaleString();
+  }
+
+  function copyBox(label, value) {
+    var id = "copy-" + Math.random().toString(36).slice(2);
+    return (
+      '<div class="token-box">' +
+      "<div><strong>" + escapeHtml(label) + ":</strong> shown once - save it now.<br/>" +
+      '<code id="' + id + '">' + escapeHtml(value) + "</code></div>" +
+      '<button class="secondary small" onclick="navigator.clipboard.writeText(document.getElementById(\'' + id + "').textContent).then(function(){window.__ofToast('Copied')})\">Copy</button>" +
+      "</div>"
+    );
+  }
+  window.__ofToast = function (m) { toast(m); };
+
+  // ---------- Nodes ----------
+  function loadNodes() {
+    api("/v1/admin/nodes").then(function (nodes) {
+      var el = document.getElementById("nodes-table");
+      if (!nodes || nodes.length === 0) { el.innerHTML = '<div class="empty">No nodes yet.</div>'; return; }
+      var rows = nodes.map(function (n) {
+        return (
+          "<tr><td>" + escapeHtml(n.Name) + "</td><td>" + shortId(n.ID) + "</td>" +
+          "<td>" + n.MaxKeys + "</td>" +
+          '<td><span class="badge ' + (n.Status === "active" ? "ok" : "off") + '">' + escapeHtml(n.Status) + "</span></td>" +
+          "<td>" + formatDate(n.LastHeartbeatAt) + "</td>" +
+          '<td class="actions"><button class="secondary small" data-rotate="' + n.ID + '">Rotate token</button></td></tr>'
+        );
+      }).join("");
+      el.innerHTML =
+        '<div class="table-scroll"><table><thead><tr><th>Name</th><th>ID</th><th>Max keys</th><th>Status</th><th>Last heartbeat</th><th></th></tr></thead><tbody>' +
+        rows + "</tbody></table></div>";
+      el.querySelectorAll("[data-rotate]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Rotate this node's token? The old token stops working immediately.")) return;
+          api("/v1/admin/nodes/" + btn.getAttribute("data-rotate") + "/rotate-token", { method: "POST" })
+            .then(function (r) {
+              document.getElementById("node-token-box").innerHTML = copyBox("New node token", r.token);
+              toast("Token rotated");
+            }).catch(function (e) { toast(e.message, true); });
+        });
+      });
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  document.getElementById("node-create-btn").addEventListener("click", function () {
+    var name = document.getElementById("node-name").value.trim();
+    var maxKeys = parseInt(document.getElementById("node-maxkeys").value, 10) || 500;
+    if (!name) { toast("Name is required", true); return; }
+    api("/v1/admin/nodes", { method: "POST", body: { name: name, max_keys: maxKeys } })
+      .then(function (r) {
+        document.getElementById("node-token-box").innerHTML = copyBox("Node token", r.token);
+        document.getElementById("node-name").value = "";
+        toast("Node created");
+        loadNodes();
+      }).catch(function (e) { toast(e.message, true); });
+  });
+
+  // ---------- Keys ----------
+  function loadKeys(ownerRef) {
+    var qs = ownerRef ? ("?owner_ref=" + encodeURIComponent(ownerRef)) : "";
+    api("/v1/admin/keys" + qs).then(function (keys) {
+      var el = document.getElementById("keys-table");
+      if (!keys || keys.length === 0) { el.innerHTML = '<div class="empty">No keys yet.</div>'; return; }
+      var rows = keys.map(function (k) {
+        var used = formatBytes((k.BytesSentTotal || 0) + (k.BytesReceivedTotal || 0));
+        var limit = k.TrafficLimitBytes != null ? formatBytes(k.TrafficLimitBytes) : "unlimited";
+        return (
+          "<tr><td>" + escapeHtml(k.Label || "(no label)") + "</td><td>" + shortId(k.ID) + "</td>" +
+          "<td>" + escapeHtml(k.Transport) + "</td>" +
+          '<td><span class="badge ' + (k.Enabled ? "ok" : "off") + '">' + (k.Enabled ? "enabled" : "disabled") + "</span></td>" +
+          "<td>" + used + " / " + limit + "</td>" +
+          "<td>" + escapeHtml(k.OwnerRef || "—") + "</td>" +
+          '<td class="actions">' +
+          '<button class="secondary small" data-toggle="' + k.ID + '" data-enabled="' + k.Enabled + '">' + (k.Enabled ? "Disable" : "Enable") + "</button>" +
+          '<button class="danger small" data-delete="' + k.ID + '">Delete</button>' +
+          "</td></tr>"
+        );
+      }).join("");
+      el.innerHTML =
+        '<div class="table-scroll"><table><thead><tr><th>Label</th><th>ID</th><th>Transport</th><th>Status</th><th>Traffic</th><th>Owner</th><th></th></tr></thead><tbody>' +
+        rows + "</tbody></table></div>";
+      el.querySelectorAll("[data-toggle]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var enable = btn.getAttribute("data-enabled") !== "true";
+          api("/v1/admin/keys/" + btn.getAttribute("data-toggle") + "/" + (enable ? "enable" : "disable"), { method: "POST" })
+            .then(function () { toast(enable ? "Key enabled" : "Key disabled"); loadKeys(ownerRef); })
+            .catch(function (e) { toast(e.message, true); });
+        });
+      });
+      el.querySelectorAll("[data-delete]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Delete this key permanently?")) return;
+          api("/v1/admin/keys/" + btn.getAttribute("data-delete"), { method: "DELETE" })
+            .then(function () { toast("Key deleted"); loadKeys(ownerRef); })
+            .catch(function (e) { toast(e.message, true); });
+        });
+      });
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  document.getElementById("key-create-btn").addEventListener("click", function () {
+    var label = document.getElementById("key-label").value.trim();
+    var docUrl = document.getElementById("key-docurl").value.trim();
+    var limitGb = document.getElementById("key-limit").value;
+    var owner = document.getElementById("key-owner").value.trim();
+    if (!docUrl) { toast("Yandex Docs URL is required", true); return; }
+    var body = { label: label, doc_url: docUrl, transport: "yandex", owner_ref: owner };
+    if (limitGb) body.traffic_limit_bytes = Math.round(parseFloat(limitGb) * 1024 * 1024 * 1024);
+    api("/v1/admin/keys", { method: "POST", body: body })
+      .then(function (r) {
+        document.getElementById("key-token-box").innerHTML = copyBox("Key token", r.token);
+        document.getElementById("key-label").value = "";
+        document.getElementById("key-docurl").value = "";
+        document.getElementById("key-limit").value = "";
+        document.getElementById("key-owner").value = "";
+        toast("Key created");
+        loadKeys();
+      }).catch(function (e) { toast(e.message, true); });
+  });
+  document.getElementById("key-filter-btn").addEventListener("click", function () {
+    loadKeys(document.getElementById("key-filter").value.trim());
+  });
+
+  // ---------- Ingest tokens ----------
+  function loadIngestTokens() {
+    api("/v1/admin/ingest-tokens").then(function (tokens) {
+      var el = document.getElementById("ingest-table");
+      if (!tokens || tokens.length === 0) { el.innerHTML = '<div class="empty">No ingest tokens yet.</div>'; return; }
+      var rows = tokens.map(function (t) {
+        return (
+          "<tr><td>" + escapeHtml(t.Label || "(no label)") + "</td><td>" + shortId(t.ID) + "</td>" +
+          "<td>" + escapeHtml(t.Scope) + "</td>" +
+          '<td><span class="badge ' + (t.Enabled ? "ok" : "off") + '">' + (t.Enabled ? "enabled" : "disabled") + "</span></td>" +
+          "<td>" + formatDate(t.CreatedAt) + "</td>" +
+          '<td class="actions"><button class="secondary small" data-toggle="' + t.ID + '" data-enabled="' + t.Enabled + '">' +
+          (t.Enabled ? "Disable" : "Enable") + "</button></td></tr>"
+        );
+      }).join("");
+      el.innerHTML =
+        '<div class="table-scroll"><table><thead><tr><th>Label</th><th>ID</th><th>Scope</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>' +
+        rows + "</tbody></table></div>";
+      el.querySelectorAll("[data-toggle]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var enable = btn.getAttribute("data-enabled") !== "true";
+          api("/v1/admin/ingest-tokens/" + btn.getAttribute("data-toggle") + "/" + (enable ? "enable" : "disable"), { method: "POST" })
+            .then(function () { toast(enable ? "Token enabled" : "Token disabled"); loadIngestTokens(); })
+            .catch(function (e) { toast(e.message, true); });
+        });
+      });
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  document.getElementById("ingest-create-btn").addEventListener("click", function () {
+    var label = document.getElementById("ingest-label").value.trim();
+    api("/v1/admin/ingest-tokens", { method: "POST", body: { label: label, scope: "keys:write" } })
+      .then(function (r) {
+        document.getElementById("ingest-token-box").innerHTML = copyBox("Ingest token", r.token);
+        document.getElementById("ingest-label").value = "";
+        toast("Ingest token created");
+        loadIngestTokens();
+      }).catch(function (e) { toast(e.message, true); });
+  });
+
+  // ---------- Tabs ----------
+  document.querySelectorAll("nav.tabs button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("nav.tabs button").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll("section.tab").forEach(function (s) { s.classList.remove("active"); });
+      btn.classList.add("active");
+      document.getElementById("tab-" + btn.getAttribute("data-tab")).classList.add("active");
+    });
+  });
+
+  // ---------- Login ----------
+  function showApp() {
+    document.getElementById("login-view").classList.add("hidden");
+    document.getElementById("app-view").classList.remove("hidden");
+    document.getElementById("logout-btn").classList.remove("hidden");
+    loadNodes();
+    loadKeys();
+    loadIngestTokens();
+  }
+  function showLogin() {
+    document.getElementById("login-view").classList.remove("hidden");
+    document.getElementById("app-view").classList.add("hidden");
+    document.getElementById("logout-btn").classList.add("hidden");
+  }
+
+  document.getElementById("login-btn").addEventListener("click", function () {
+    var t = document.getElementById("login-token").value.trim();
+    if (!t) return;
+    setToken(t);
+    // Confirm the token actually works before declaring success.
+    api("/v1/admin/nodes").then(function () { showApp(); }).catch(function () {
+      clearToken();
+      toast("Invalid admin token", true);
+    });
+  });
+  document.getElementById("login-token").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") document.getElementById("login-btn").click();
+  });
+  document.getElementById("logout-btn").addEventListener("click", function () {
+    clearToken();
+    showLogin();
+  });
+
+  if (getToken()) {
+    api("/v1/admin/nodes").then(function () { showApp(); }).catch(function () { showLogin(); });
+  } else {
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>
