@@ -46,6 +46,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("GET /v1/admin/keys/{id}", a.withAdmin(a.handleGetKey))
 	mux.HandleFunc("PATCH /v1/admin/keys/{id}", a.withAdmin(a.handlePatchKey))
 	mux.HandleFunc("DELETE /v1/admin/keys/{id}", a.withAdmin(a.handleDeleteKey))
+	mux.HandleFunc("POST /v1/admin/keys/{id}/rotate-token", a.withAdmin(a.handleRotateKeyToken))
 	mux.HandleFunc("POST /v1/admin/keys/{id}/enable", a.withAdmin(a.handleSetKeyEnabled(true)))
 	mux.HandleFunc("POST /v1/admin/keys/{id}/disable", a.withAdmin(a.handleSetKeyEnabled(false)))
 

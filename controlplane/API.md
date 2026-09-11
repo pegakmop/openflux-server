@@ -195,6 +195,20 @@ Same shape as one element of the list above. `404` if it doesn't exist.
 
 `204 No Content` on success, `404` if it doesn't exist. Irreversible.
 
+### `POST /v1/admin/keys/{id}/rotate-token` — rotate a key's token
+
+Invalidates the key's current token immediately and issues a new one - the only way to get a usable
+token (or a deep link built from it) for a key whose original token from creation is already gone,
+since it's only ever stored hashed. Every other field (label, doc_url, traffic limit, owner_ref,
+usage stats) is untouched.
+
+```json
+// 200 response
+{"token": "of_key_...", "deep_link": "openflux://import?data=eyJuYW1lIj..."}
+```
+`deep_link` follows the same rule as key creation (present only with `CONTROLPLANE_PUBLIC_URL`
+configured). `404` if `{id}` doesn't exist.
+
 ## Admin: ingest tokens
 
 An ingest token lets an external service (a bot, a storefront, whatever

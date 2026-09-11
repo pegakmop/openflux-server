@@ -144,6 +144,40 @@ func (a *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	createKeyHandler(a, w, r, "")
 }
 
+type rotateKeyTokenResponse struct {
+	Token    string `json:"token"`
+	DeepLink string `json:"deep_link,omitempty"`
+}
+
+// handleRotateKeyToken issues a fresh token for an existing key, since the
+// original one is only ever stored hashed - there's no other way to get a
+// usable token (or the deep link built from it) for a key whose raw token
+// from creation is already gone. Every other field is untouched.
+func (a *App) handleRotateKeyToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	token, err := auth.GenerateToken("key")
+	if err != nil {
+		writeInternalError(w, r, "token generation failed", err)
+		return
+	}
+
+	k, err := a.Store.RotateKeyToken(r.Context(), id, a.Hasher.Hash(token))
+	if err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, "rotate key token failed", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rotateKeyTokenResponse{
+		Token:    token,
+		DeepLink: buildDeepLink(a.Config.PublicBaseURL, k.Label, token),
+	})
+}
+
 func (a *App) handleGetKey(w http.ResponseWriter, r *http.Request) {
 	k, err := a.Store.GetKeyByID(r.Context(), r.PathValue("id"))
 	if err == store.ErrNotFound {

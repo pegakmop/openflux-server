@@ -413,6 +413,7 @@
           "<td>" + escapeHtml(k.OwnerRef || "—") + "</td>" +
           '<td class="actions">' +
           '<button class="secondary small" data-toggle="' + k.ID + '" data-enabled="' + k.Enabled + '">' + (k.Enabled ? "Отключить" : "Включить") + "</button>" +
+          '<button class="secondary small" data-rotate="' + k.ID + '">Обновить токен</button>' +
           '<button class="danger small" data-delete="' + k.ID + '">Удалить</button>' +
           "</td></tr>"
         );
@@ -425,6 +426,21 @@
           var enable = btn.getAttribute("data-enabled") !== "true";
           api("/v1/admin/keys/" + btn.getAttribute("data-toggle") + "/" + (enable ? "enable" : "disable"), { method: "POST" })
             .then(function () { toast(enable ? "Ключ включён" : "Ключ отключён"); loadKeys(ownerRef); })
+            .catch(function (e) { toast(e.message, true); });
+        });
+      });
+      el.querySelectorAll("[data-rotate]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Обновить токен этого ключа? Старый токен перестанет работать немедленно.")) return;
+          api("/v1/admin/keys/" + btn.getAttribute("data-rotate") + "/rotate-token", { method: "POST" })
+            .then(function (r) {
+              var boxes = copyBox("Токен ключа", r.token);
+              if (r.deep_link) {
+                boxes += copyBox("Ссылка для приложения", r.deep_link);
+              }
+              document.getElementById("key-token-box").innerHTML = boxes;
+              toast("Токен обновлён");
+            })
             .catch(function (e) { toast(e.message, true); });
         });
       });

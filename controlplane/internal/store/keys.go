@@ -153,6 +153,24 @@ func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) erro
 	return nil
 }
 
+// RotateKeyToken invalidates a key's current token and issues a new one,
+// leaving every other field (label, doc_url, traffic limit, owner_ref,
+// usage stats) untouched - for when the raw token from creation is gone
+// (it's only ever stored hashed) but the key itself should keep working.
+func (s *Store) RotateKeyToken(ctx context.Context, id, newTokenHash string) (model.Key, error) {
+	row := s.pool.QueryRow(ctx, `
+		UPDATE keys SET token_hash = $1, updated_at = now() WHERE id = $2
+		RETURNING `+keyColumns, newTokenHash, id)
+	k, err := scanKey(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Key{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Key{}, fmt.Errorf("rotate key token: %w", err)
+	}
+	return k, nil
+}
+
 func (s *Store) SetKeyTrafficLimit(ctx context.Context, id string, limit *int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE keys SET traffic_limit_bytes = $1, updated_at = now() WHERE id = $2`, limit, id)
 	if err != nil {
