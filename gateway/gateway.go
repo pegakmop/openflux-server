@@ -15,6 +15,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -98,6 +99,15 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	if err := s.gvisorStack.SetSpoofing(gatewayNIC, true); err != nil {
 		return fmt.Errorf("enable spoofing: %v", err)
 	}
+	// Promiscuous+spoofing gets an incoming packet accepted with no address
+	// of its own on the NIC, but a route is still what tells the stack
+	// which NIC to send a *reply* out of - without one, gvisor has nowhere
+	// to route the SYN-ACK, CreateEndpoint's handshake fails, and nothing
+	// downstream (the dialer, the actual tunnel) ever sees a single byte.
+	s.gvisorStack.AddRoute(tcpip.Route{
+		Destination: header.IPv4EmptySubnet,
+		NIC:         gatewayNIC,
+	})
 
 	tcpForwarder := tcp.NewForwarder(s.gvisorStack, 0, 2048, s.handleTCP)
 	s.gvisorStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
@@ -108,6 +118,16 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	go s.readTunLoop(tunReader)
 
 	return nil
+}
+
+// PacketCounts reports how many raw IP packets have been read from the TUN
+// (in) and written back to it (out) since Start - see
+// tunnel.TunnelLinkEndpoint.PacketCounts.
+func (s *Server) PacketCounts() (in, out uint64) {
+	if s.linkEP == nil {
+		return 0, 0
+	}
+	return s.linkEP.PacketCounts()
 }
 
 // Close tears the gateway's gvisor stack down. It does not close
@@ -128,6 +148,9 @@ func (s *Server) readTunLoop(r io.Reader) {
 			if !s.closed.Load() {
 				utils.Debugf("[GATEWAY] tun read error: %v", err)
 			}
+			return
+		}
+		if s.closed.Load() {
 			return
 		}
 		if n == 0 {
