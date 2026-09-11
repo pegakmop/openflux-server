@@ -449,7 +449,11 @@
     if (limitGb) body.traffic_limit_bytes = Math.round(parseFloat(limitGb) * 1024 * 1024 * 1024);
     api("/v1/admin/keys", { method: "POST", body: body })
       .then(function (r) {
-        document.getElementById("key-token-box").innerHTML = copyBox("Токен ключа", r.token);
+        var boxes = copyBox("Токен ключа", r.token);
+        if (r.deep_link) {
+          boxes += copyBox("Ссылка для приложения", r.deep_link);
+        }
+        document.getElementById("key-token-box").innerHTML = boxes;
         document.getElementById("key-label").value = "";
         document.getElementById("key-docurl").value = "";
         document.getElementById("key-limit").value = "";

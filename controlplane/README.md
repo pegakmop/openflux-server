@@ -19,6 +19,7 @@ traffic: issuing/validating keys, batched traffic-usage reports, and node coordi
 | `CONTROLPLANE_ADMIN_TOKEN`         | yes      | Bootstrap bearer token for the `/v1/admin/*` endpoints              |
 | `CONTROLPLANE_LISTEN_ADDR`         | no       | Default `:8080`                                                     |
 | `CONTROLPLANE_RATE_LIMIT_RPS`      | no       | Per-IP requests/sec allowed on `/v1/resolve`, default `1`           |
+| `CONTROLPLANE_PUBLIC_URL`          | no       | How clients reach this server (e.g. `https://your-domain-or-ip`, no path/trailing slash) — set by `deploy/install.sh` automatically. Without it, key-creation responses omit `deep_link` (see API.md) since a link with no working `control_url` isn't useful |
 
 Migrations in `internal/db/migrations` run automatically on startup (tracked in a
 `schema_migrations` table, safe to run repeatedly).

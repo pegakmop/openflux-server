@@ -19,6 +19,7 @@ OpenFlux. Это отдельный Go-модуль и отдельно разв
 | `CONTROLPLANE_ADMIN_TOKEN`         | да          | Начальный bearer-токен для эндпоинтов `/v1/admin/*`                   |
 | `CONTROLPLANE_LISTEN_ADDR`         | нет         | По умолчанию `:8080`                                                   |
 | `CONTROLPLANE_RATE_LIMIT_RPS`      | нет         | Запросов/сек с одного IP на `/v1/resolve`, по умолчанию `1`            |
+| `CONTROLPLANE_PUBLIC_URL`          | нет         | Адрес, по которому клиенты обращаются к серверу (например, `https://ваш-домен-или-ip`, без пути и слэша в конце) — `deploy/install.sh` выставляет это сам. Без неё ответы на создание ключа не содержат `deep_link` (см. API.ru.md) — ссылка с нерабочим `control_url` бесполезна |
 
 Миграции в `internal/db/migrations` применяются автоматически при старте (отслеживаются в таблице
 `schema_migrations`, повторный запуск безопасен).

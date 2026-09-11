@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,12 @@ type Config struct {
 	NodePollWindow time.Duration
 	RateLimitRPS   float64
 	RateLimitBurst int
+	// PublicBaseURL is how clients reach this controlplane (e.g.
+	// https://your-domain-or-ip - no path, no trailing slash) - not the
+	// same thing as ListenAddr, which is only the internal bind address.
+	// Optional: unset just means admin-created keys don't get a deep link
+	// in their API response (see internal/api/deeplink.go).
+	PublicBaseURL string
 }
 
 func FromEnv() (Config, error) {
@@ -26,6 +33,7 @@ func FromEnv() (Config, error) {
 		NodePollWindow: 90 * time.Second,
 		RateLimitRPS:   1,
 		RateLimitBurst: 5,
+		PublicBaseURL:  strings.TrimRight(os.Getenv("CONTROLPLANE_PUBLIC_URL"), "/"),
 	}
 
 	if cfg.DatabaseURL == "" {

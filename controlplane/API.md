@@ -137,8 +137,11 @@ Only `doc_url` is required; `transport` defaults to `"yandex"`;
 
 ```json
 // 201 response
-{"id": "9c2f...", "token": "of_key_..."}
+{"id": "9c2f...", "token": "of_key_...", "deep_link": "openflux://import?data=eyJuYW1lIj..."}
 ```
+`deep_link` is only present when the server has `CONTROLPLANE_PUBLIC_URL` configured - tapping it
+opens the Android app straight to a prefilled "key" mode profile (see openflux-app's
+`data/ProfileDeepLink.kt`). Omitted entirely otherwise.
 
 ### `GET /v1/admin/keys` — list keys
 
@@ -246,10 +249,11 @@ either a single object or a JSON array of up to 200, for bulk creation.
 
 ```json
 // 201 response — single request, single object back
-{"id": "9c2f...", "token": "of_key_..."}
+{"id": "9c2f...", "token": "of_key_...", "deep_link": "openflux://import?data=eyJuYW1lIj..."}
 ```
-A batch (array) request gets a JSON array of the same objects back, in the
-same order. `403` if the token's scope isn't `keys:write`.
+`deep_link` follows the same rule as the admin endpoint above (present only with
+`CONTROLPLANE_PUBLIC_URL` configured). A batch (array) request gets a JSON array of the same
+objects back, in the same order. `403` if the token's scope isn't `keys:write`.
 
 ## Node: pull assigned keys and report usage
 

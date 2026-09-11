@@ -18,8 +18,9 @@ type createKeyRequest struct {
 }
 
 type createdKey struct {
-	ID    string `json:"id"`
-	Token string `json:"token"`
+	ID       string `json:"id"`
+	Token    string `json:"token"`
+	DeepLink string `json:"deep_link,omitempty"`
 }
 
 // createKeyHandler is shared by the admin key-creation endpoint and the
@@ -94,7 +95,11 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			return
 		}
 
-		created = append(created, createdKey{ID: k.ID, Token: token})
+		created = append(created, createdKey{
+			ID:       k.ID,
+			Token:    token,
+			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token),
+		})
 	}
 
 	if len(created) == 1 {
