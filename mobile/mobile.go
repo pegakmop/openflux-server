@@ -34,6 +34,14 @@ import (
 type Callback interface {
 	OnStatus(status string) // "connecting" | "connected" | "error:<message>" | "stopped"
 	OnStats(bytesSent int64, bytesReceived int64)
+	// OnLogEvent reports a fine-grained connection-lifecycle event for a
+	// human-facing log feed, distinct from OnStatus's coarse current-state
+	// snapshot: OnStatus only ever says "connected" once per StartTunnel
+	// call, while the transport keeps silently reconnecting in the
+	// background after that - these events are what makes that visible.
+	// code/detail are transport.Event* constants and their documented
+	// detail shapes (see transport/transport.go).
+	OnLogEvent(code string, detail string)
 }
 
 // Config is the JSON contract for StartTunnel, mirroring one Android
@@ -95,6 +103,11 @@ func StartTunnel(tunFd int, configJSON string, cb Callback) error {
 
 	transportConfig := transport.DefaultConfig()
 	trans := transport.NewCompressedTransport(yandex.NewYandexDocsTransport(docURL, transportConfig))
+	trans.SetEventCallback(func(code, detail string) {
+		if cb != nil {
+			cb.OnLogEvent(code, detail)
+		}
+	})
 
 	if err := trans.Start(); err != nil {
 		return fail(cb, fmt.Errorf("start transport: %w", err))

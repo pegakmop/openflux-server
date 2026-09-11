@@ -23,6 +23,10 @@ func (t *OneMeTransport) Stats() transport.TransportStats {
 	return t.b.Stats()
 }
 
+func (t *OneMeTransport) SetEventCallback(fn func(code, detail string)) {
+	t.b.SetEventCallback(fn)
+}
+
 func NewOneMeTransport(isExit bool, maxToken string, maxUid int64, config transport.TransportConfig) *OneMeTransport {
 	return &OneMeTransport{
 		b:     transport.NewBaseTransport(config),

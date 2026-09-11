@@ -22,7 +22,26 @@ type Transport interface {
 	Receive(callback func([]byte))
 	IsConnected() bool
 	Stats() TransportStats
+	SetEventCallback(fn func(code, detail string))
 }
+
+// Event codes reported via SetEventCallback/EmitEvent, for a human-facing
+// connection log distinct from the coarser started/connected/stopped
+// lifecycle a caller already gets some other way (e.g. mobile.Callback's
+// OnStatus). detail's shape depends on code and is documented at each
+// emitter - see yandex.YandexDocsTransport for the concrete transport that
+// currently reports these.
+const (
+	// EventConnecting fires once per connection attempt, before it starts.
+	// detail is the 1-based attempt number.
+	EventConnecting = "connecting"
+	// EventConnected fires once a connection attempt succeeds. detail is
+	// the 1-based attempt number that succeeded.
+	EventConnected = "connected"
+	// EventRetrying fires when an attempt fails and another is scheduled
+	// after a backoff delay. detail is "<failed attempt>|<delay seconds>|<reason code>".
+	EventRetrying = "retrying"
+)
 
 type TransportStats struct {
 	BytesSent     uint64
@@ -59,6 +78,7 @@ type BaseTransport struct {
 	startTime time.Time
 
 	receiveCallback func([]byte)
+	eventCallback   func(code, detail string)
 	Mu              sync.RWMutex
 
 	reconnectAttempts atomic.Int32
@@ -111,6 +131,26 @@ func (b *BaseTransport) CallReceive(data []byte) {
 	b.Mu.RUnlock()
 	if cb != nil {
 		cb(data)
+	}
+}
+
+// SetEventCallback registers fn to receive connection-lifecycle events (see
+// the Event* constants) via EmitEvent. Not safe to change once a transport
+// has started emitting - callers set it once, right after construction.
+func (b *BaseTransport) SetEventCallback(fn func(code, detail string)) {
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	b.eventCallback = fn
+}
+
+// EmitEvent reports one event to whatever SetEventCallback registered, if
+// anything. Concrete transports call this; it's a no-op with none set.
+func (b *BaseTransport) EmitEvent(code, detail string) {
+	b.Mu.RLock()
+	fn := b.eventCallback
+	b.Mu.RUnlock()
+	if fn != nil {
+		fn(code, detail)
 	}
 }
 

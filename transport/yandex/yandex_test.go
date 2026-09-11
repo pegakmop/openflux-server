@@ -50,6 +50,48 @@ func TestBackoffDelayZeroWhenDisabled(t *testing.T) {
 	}
 }
 
+// --- scheduleReconnect: reports a retrying event before backing off -----
+
+func TestScheduleReconnectEmitsRetryingEvent(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.TransportConfig{
+		ReconnectDelay:       5 * time.Millisecond,
+		ReconnectMultiplier:  1,
+		MaxReconnectAttempts: 999,
+	})
+	tr.BaseTransport.Start() // marks it running without spawning connectToDoc/keepAliveLoop
+
+	var gotCode, gotDetail string
+	tr.SetEventCallback(func(code, detail string) {
+		gotCode, gotDetail = code, detail
+		// Stop the transport so scheduleReconnect's post-sleep IsRunning
+		// check bails out instead of actually redialing unused.invalid.
+		tr.Stop()
+	})
+
+	tr.scheduleReconnect(2, reasonReadError) // 3rd attempt (0-based 2) failed with a read error
+
+	if gotCode != transport.EventRetrying {
+		t.Fatalf("code = %q, want %q", gotCode, transport.EventRetrying)
+	}
+	if gotDetail != "3|0|read_error" {
+		t.Errorf("detail = %q, want %q (attempt|delaySeconds|reason)", gotDetail, "3|0|read_error")
+	}
+}
+
+func TestScheduleReconnectDoesNothingWhenNotRunning(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	// Never started - IsRunning() is false.
+
+	called := false
+	tr.SetEventCallback(func(code, detail string) { called = true })
+
+	tr.scheduleReconnect(0, reasonDialFailed)
+
+	if called {
+		t.Errorf("scheduleReconnect emitted an event even though the transport was never running")
+	}
+}
+
 // --- fetchDocInfo: must never panic on a malformed page ----------------
 
 func TestFetchDocInfoMalformedConfigReturnsErrorNotPanic(t *testing.T) {
