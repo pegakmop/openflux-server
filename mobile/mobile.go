@@ -234,12 +234,6 @@ func pumpStats(s *session, cb Callback) {
 			stats := s.trans.Stats()
 			if cb != nil {
 				cb.OnStats(int64(stats.BytesSent), int64(stats.BytesReceived))
-				gwIn, gwOut := s.gw.PacketCounts()
-				tunIn, tunOut := s.tun.PacketCounts()
-				cb.OnLogEvent("debug", fmt.Sprintf(
-					"gateway(tun->app) in=%d out=%d | tunnel(app->transport) in=%d out=%d | transport sent=%d recv=%d",
-					gwIn, gwOut, tunIn, tunOut, stats.BytesSent, stats.BytesReceived,
-				))
 			}
 		}
 	}

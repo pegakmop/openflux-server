@@ -204,13 +204,6 @@ func (t *TCPTunnel) ListenTCP(port uint16) (net.Listener, error) {
 	}, ipv4.ProtocolNumber)
 }
 
-// PacketCounts reports how many packets have been injected into (in) and
-// emitted out of (out) this tunnel's own virtual NIC - see
-// TunnelLinkEndpoint.PacketCounts.
-func (t *TCPTunnel) PacketCounts() (in, out uint64) {
-	return t.tunnelEP.PacketCounts()
-}
-
 func (t *TCPTunnel) printStats() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

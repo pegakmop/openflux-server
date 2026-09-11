@@ -120,16 +120,6 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	return nil
 }
 
-// PacketCounts reports how many raw IP packets have been read from the TUN
-// (in) and written back to it (out) since Start - see
-// tunnel.TunnelLinkEndpoint.PacketCounts.
-func (s *Server) PacketCounts() (in, out uint64) {
-	if s.linkEP == nil {
-		return 0, 0
-	}
-	return s.linkEP.PacketCounts()
-}
-
 // Close tears the gateway's gvisor stack down. It does not close
 // tunReader/tunWriter - the caller owns that file's lifecycle (in the
 // mobile package, the TUN fd handed in from Android).
