@@ -2,6 +2,7 @@ package yandex
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,13 +69,35 @@ func TestScheduleReconnectEmitsRetryingEvent(t *testing.T) {
 		tr.Stop()
 	})
 
-	tr.scheduleReconnect(2, reasonReadError) // 3rd attempt (0-based 2) failed with a read error
+	tr.scheduleReconnect(2, reasonReadError, errors.New("websocket: close 1006 (abnormal closure)"))
 
 	if gotCode != transport.EventRetrying {
 		t.Fatalf("code = %q, want %q", gotCode, transport.EventRetrying)
 	}
-	if gotDetail != "3|0|read_error" {
-		t.Errorf("detail = %q, want %q (attempt|delaySeconds|reason)", gotDetail, "3|0|read_error")
+	const want = "3|0|read_error|websocket: close 1006 (abnormal closure)"
+	if gotDetail != want {
+		t.Errorf("detail = %q, want %q (attempt|delaySeconds|reason|cause)", gotDetail, want)
+	}
+}
+
+func TestScheduleReconnectStripsNewlinesFromCause(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.TransportConfig{
+		ReconnectDelay:       time.Millisecond,
+		ReconnectMultiplier:  1,
+		MaxReconnectAttempts: 999,
+	})
+	tr.BaseTransport.Start()
+
+	var gotDetail string
+	tr.SetEventCallback(func(code, detail string) {
+		gotDetail = detail
+		tr.Stop()
+	})
+
+	tr.scheduleReconnect(0, reasonFetchFailed, errors.New("line one\nline two"))
+
+	if strings.Contains(gotDetail, "\n") {
+		t.Errorf("detail = %q, should not contain a literal newline", gotDetail)
 	}
 }
 
@@ -85,7 +108,7 @@ func TestScheduleReconnectDoesNothingWhenNotRunning(t *testing.T) {
 	called := false
 	tr.SetEventCallback(func(code, detail string) { called = true })
 
-	tr.scheduleReconnect(0, reasonDialFailed)
+	tr.scheduleReconnect(0, reasonDialFailed, errors.New("connection refused"))
 
 	if called {
 		t.Errorf("scheduleReconnect emitted an event even though the transport was never running")

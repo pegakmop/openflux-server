@@ -147,7 +147,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		info, err := t.fetchDocInfo(t.url, userID)
 		if err != nil {
 			utils.Debugf("[YDOCS] fetchDocInfo failed: %v", err)
-			t.scheduleReconnect(attempt, reasonFetchFailed)
+			t.scheduleReconnect(attempt, reasonFetchFailed, err)
 			return
 		}
 
@@ -164,7 +164,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		conn, _, err := dialer.Dial(info.WsURL, headers)
 		if err != nil {
 			utils.Debugf("[YDOCS] WebSocket dial failed: %v", err)
-			t.scheduleReconnect(attempt, reasonDialFailed)
+			t.scheduleReconnect(attempt, reasonDialFailed, err)
 			return
 		}
 
@@ -180,7 +180,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		if err != nil {
 			utils.Debugf("[YDOCS] handshake failed: %v", err)
 			conn.Close()
-			t.scheduleReconnect(attempt, reasonHandshakeFailed)
+			t.scheduleReconnect(attempt, reasonHandshakeFailed, err)
 			return
 		}
 
@@ -216,14 +216,14 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			utils.Debugf("[YDOCS] marshal auth message failed: %v", err)
 			t.SetConnected(false)
 			conn.Close()
-			t.scheduleReconnect(attempt, reasonSendFailed)
+			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
 		}
 		if err := session.safeWrite(websocket.TextMessage, []byte(fmt.Sprintf("42%s", string(messagePart)))); err != nil {
 			utils.Debugf("[YDOCS] send auth message failed: %v", err)
 			t.SetConnected(false)
 			conn.Close()
-			t.scheduleReconnect(attempt, reasonSendFailed)
+			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
 		}
 		t.EmitEvent(transport.EventConnected, strconv.Itoa(attempt+1))
@@ -234,7 +234,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			if err != nil {
 				utils.Debugf("[YDOCS] Read error: %v", err)
 				t.SetConnected(false)
-				t.scheduleReconnect(attempt, reasonReadError)
+				t.scheduleReconnect(attempt, reasonReadError, err)
 				return
 			}
 			t.handleMessage(session, message)
@@ -419,8 +419,12 @@ func (t *YandexDocsTransport) extractBase64String(response string) string {
 // scheduleReconnect waits out an exponential backoff (see
 // transport.DefaultConfig's ReconnectDelay/ReconnectMultiplier/
 // MaxReconnectDelay) before retrying, instead of hammering the server in a
-// tight loop every time a connection attempt fails fast.
-func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string) {
+// tight loop every time a connection attempt fails fast. cause is the
+// actual error that triggered this retry - reasonCode alone only tells a
+// human-facing log which of a handful of fixed categories it falls into
+// ("couldn't reach the document"), not what specifically went wrong; cause
+// is carried in the same event for a caller that wants to show both.
+func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, cause error) {
 	if !t.IsRunning() || attempt >= t.GetConfig().MaxReconnectAttempts {
 		return
 	}
@@ -428,7 +432,8 @@ func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string) 
 	t.RecordReconnect()
 
 	delay := t.backoffDelay(attempt)
-	t.EmitEvent(transport.EventRetrying, fmt.Sprintf("%d|%d|%s", attempt+1, int(delay.Seconds()), reasonCode))
+	causeText := strings.ReplaceAll(cause.Error(), "\n", " ")
+	t.EmitEvent(transport.EventRetrying, fmt.Sprintf("%d|%d|%s|%s", attempt+1, int(delay.Seconds()), reasonCode, causeText))
 	if delay > 0 {
 		time.Sleep(delay)
 	}

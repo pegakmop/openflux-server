@@ -39,7 +39,11 @@ const (
 	// the 1-based attempt number that succeeded.
 	EventConnected = "connected"
 	// EventRetrying fires when an attempt fails and another is scheduled
-	// after a backoff delay. detail is "<failed attempt>|<delay seconds>|<reason code>".
+	// after a backoff delay. detail is
+	// "<failed attempt>|<delay seconds>|<reason code>|<cause>", where cause
+	// is the actual error's text (single line, newlines stripped) - reason
+	// code alone only says which of a handful of fixed categories the
+	// failure falls into, not what specifically went wrong.
 	EventRetrying = "retrying"
 )
 
