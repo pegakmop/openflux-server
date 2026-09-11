@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OpenFlux Control Plane</title>
+<title>Панель управления OpenFlux</title>
 <style>
   :root {
     color-scheme: dark;
@@ -101,9 +101,14 @@
     margin-bottom: 18px;
   }
   .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .card p.hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
 
   .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
   .row > div { flex: 1; min-width: 160px; }
+
+  dl.info { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 14px; font-size: 13px; }
+  dl.info dt { color: var(--muted); }
+  dl.info dd { margin: 0; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--panel-border); vertical-align: middle; }
@@ -148,75 +153,61 @@
 <body>
 
 <header>
-  <h1>Open<span>Flux</span> Control Plane</h1>
-  <button id="logout-btn" class="secondary hidden">Log out</button>
+  <h1>Панель управления Open<span>Flux</span></h1>
+  <button id="logout-btn" class="secondary hidden">Выйти</button>
 </header>
 
 <div id="login-view">
-  <h2>Admin sign-in</h2>
-  <p>Paste the controlplane admin token (<code>CONTROLPLANE_ADMIN_TOKEN</code>). It's kept only in this browser's local storage.</p>
-  <label for="login-token">Admin token</label>
+  <h2>Вход администратора</h2>
+  <p>Вставьте токен администратора контролплейна (<code>CONTROLPLANE_ADMIN_TOKEN</code>). Он хранится только в этом браузере (localStorage).</p>
+  <label for="login-token">Токен администратора</label>
   <input id="login-token" type="password" autocomplete="off" placeholder="admin token" />
-  <div style="margin-top:14px"><button id="login-btn">Sign in</button></div>
+  <div style="margin-top:14px"><button id="login-btn">Войти</button></div>
 </div>
 
 <main id="app-view" class="hidden">
   <nav class="tabs">
-    <button data-tab="nodes" class="active">Nodes</button>
-    <button data-tab="keys">Keys</button>
-    <button data-tab="ingest">Ingest tokens</button>
+    <button data-tab="keys" class="active">Ключи</button>
+    <button data-tab="settings">Настройки</button>
   </nav>
 
-  <section id="tab-nodes" class="tab active">
+  <section id="tab-keys" class="tab active">
     <div class="card">
-      <h3>Register a node</h3>
+      <h3>Создать ключ</h3>
       <div class="row">
-        <div><label for="node-name">Name</label><input id="node-name" placeholder="node-eu-1" /></div>
-        <div><label for="node-maxkeys">Max keys</label><input id="node-maxkeys" type="number" value="500" /></div>
-        <div><button id="node-create-btn">Create</button></div>
-      </div>
-      <div id="node-token-box"></div>
-    </div>
-    <div class="card">
-      <h3>Nodes</h3>
-      <div id="nodes-table"></div>
-    </div>
-  </section>
-
-  <section id="tab-keys" class="tab">
-    <div class="card">
-      <h3>Create a key</h3>
-      <div class="row">
-        <div><label for="key-label">Label</label><input id="key-label" placeholder="user-42" /></div>
-        <div><label for="key-docurl">Yandex Docs URL</label><input id="key-docurl" placeholder="https://docs.yandex.ru/..." /></div>
-        <div><label for="key-limit">Traffic limit (GB, blank = unlimited)</label><input id="key-limit" type="number" min="0" /></div>
-        <div><label for="key-owner">Owner ref (optional)</label><input id="key-owner" placeholder="customer-id" /></div>
-        <div><button id="key-create-btn">Create</button></div>
+        <div><label for="key-label">Название</label><input id="key-label" placeholder="user-42" /></div>
+        <div><label for="key-docurl">Ссылка на Yandex Docs</label><input id="key-docurl" placeholder="https://docs.yandex.ru/..." /></div>
+        <div><label for="key-limit">Лимит трафика, ГБ (пусто = без лимита)</label><input id="key-limit" type="number" min="0" /></div>
+        <div><label for="key-owner">Владелец (необязательно)</label><input id="key-owner" placeholder="customer-id" /></div>
+        <div><button id="key-create-btn">Создать</button></div>
       </div>
       <div id="key-token-box"></div>
     </div>
     <div class="card">
       <div class="row" style="margin-bottom:12px">
-        <h3 style="margin:0">Keys</h3>
-        <div style="max-width:220px"><input id="key-filter" placeholder="filter by owner_ref" /></div>
-        <div><button id="key-filter-btn" class="secondary small">Filter</button></div>
+        <h3 style="margin:0">Ключи</h3>
+        <div style="max-width:220px"><input id="key-filter" placeholder="фильтр по владельцу" /></div>
+        <div><button id="key-filter-btn" class="secondary small">Фильтр</button></div>
       </div>
       <div id="keys-table"></div>
     </div>
   </section>
 
-  <section id="tab-ingest" class="tab">
+  <section id="tab-settings" class="tab">
     <div class="card">
-      <h3>Create an ingest token</h3>
-      <div class="row">
-        <div><label for="ingest-label">Label</label><input id="ingest-label" placeholder="key-gen-bot" /></div>
-        <div><button id="ingest-create-btn">Create</button></div>
-      </div>
-      <div id="ingest-token-box"></div>
+      <h3>Нода этого сервера</h3>
+      <div id="node-panel"></div>
+      <div id="node-token-box"></div>
     </div>
     <div class="card">
-      <h3>Ingest tokens</h3>
-      <div id="ingest-table"></div>
+      <h3>Автоматическая выдача ключей</h3>
+      <p class="hint">Токены для внешних сервисов (например, бота или магазина), которые сами создают ключи через API — вместо того чтобы создавать их здесь вручную.</p>
+      <div class="row">
+        <div><label for="ingest-label">Название</label><input id="ingest-label" placeholder="key-gen-bot" /></div>
+        <div><button id="ingest-create-btn">Создать токен</button></div>
+      </div>
+      <div id="ingest-token-box"></div>
+      <div id="ingest-table" style="margin-top:16px"></div>
     </div>
   </section>
 </main>
@@ -254,12 +245,12 @@
       if (resp.status === 401) {
         clearToken();
         showLogin();
-        throw new Error("session expired");
+        throw new Error("сессия истекла");
       }
       if (resp.status === 204) return null;
       return resp.json().catch(function () { return null; }).then(function (data) {
         if (!resp.ok) {
-          var msg = (data && data.error) ? data.error : ("request failed (" + resp.status + ")");
+          var msg = (data && data.error) ? data.error : ("запрос не выполнен (" + resp.status + ")");
           throw new Error(msg);
         }
         return data;
@@ -282,7 +273,7 @@
 
   function formatBytes(n) {
     if (n == null) return "—";
-    var units = ["B", "KB", "MB", "GB", "TB"];
+    var units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
     var v = Number(n), i = 0;
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return v.toFixed(1) + " " + units[i];
@@ -291,101 +282,108 @@
   function formatDate(s) {
     if (!s) return "—";
     var d = new Date(s);
-    return isNaN(d.getTime()) ? s : d.toLocaleString();
+    return isNaN(d.getTime()) ? s : d.toLocaleString("ru-RU");
   }
 
   function copyBox(label, value) {
     var id = "copy-" + Math.random().toString(36).slice(2);
     return (
       '<div class="token-box">' +
-      "<div><strong>" + escapeHtml(label) + ":</strong> shown once - save it now.<br/>" +
+      "<div><strong>" + escapeHtml(label) + ":</strong> показывается один раз — сохраните его сейчас.<br/>" +
       '<code id="' + id + '">' + escapeHtml(value) + "</code></div>" +
-      '<button class="secondary small" onclick="navigator.clipboard.writeText(document.getElementById(\'' + id + "').textContent).then(function(){window.__ofToast('Copied')})\">Copy</button>" +
+      '<button class="secondary small" onclick="navigator.clipboard.writeText(document.getElementById(\'' + id + "').textContent).then(function(){window.__ofToast('Скопировано')})\">Скопировать</button>" +
       "</div>"
     );
   }
   window.__ofToast = function (m) { toast(m); };
 
-  // ---------- Nodes ----------
-  function loadNodes() {
+  // ---------- Node ----------
+  // This panel belongs to one deployed server, which install.sh registers
+  // as exactly one exit node - so unlike a general fleet-management UI,
+  // this only ever shows/manages that single node (the first one the API
+  // returns). Running several exit nodes against one controlplane is still
+  // possible for advanced setups, just via the curl API, not this panel.
+  function loadNode() {
     api("/v1/admin/nodes").then(function (nodes) {
-      var el = document.getElementById("nodes-table");
-      if (!nodes || nodes.length === 0) { el.innerHTML = '<div class="empty">No nodes yet.</div>'; return; }
-      var rows = nodes.map(function (n) {
-        return (
-          "<tr><td>" + escapeHtml(n.Name) + "</td><td>" + shortId(n.ID) + "</td>" +
-          "<td>" + n.MaxKeys + "</td>" +
-          '<td><span class="badge ' + (n.Status === "active" ? "ok" : "off") + '">' + escapeHtml(n.Status) + "</span></td>" +
-          "<td>" + formatDate(n.LastHeartbeatAt) + "</td>" +
-          '<td class="actions"><button class="secondary small" data-rotate="' + n.ID + '">Rotate token</button></td></tr>'
-        );
-      }).join("");
-      el.innerHTML =
-        '<div class="table-scroll"><table><thead><tr><th>Name</th><th>ID</th><th>Max keys</th><th>Status</th><th>Last heartbeat</th><th></th></tr></thead><tbody>' +
-        rows + "</tbody></table></div>";
-      el.querySelectorAll("[data-rotate]").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          if (!confirm("Rotate this node's token? The old token stops working immediately.")) return;
-          api("/v1/admin/nodes/" + btn.getAttribute("data-rotate") + "/rotate-token", { method: "POST" })
+      var node = nodes && nodes.length ? nodes[0] : null;
+      var el = document.getElementById("node-panel");
+      if (!node) {
+        el.innerHTML =
+          '<p class="empty">Нода ещё не зарегистрирована на этом сервере.</p>' +
+          '<div class="row">' +
+          '<div><label for="node-name">Название</label><input id="node-name" placeholder="node-1" value="node-1" /></div>' +
+          '<div><label for="node-maxkeys">Макс. ключей</label><input id="node-maxkeys" type="number" value="500" /></div>' +
+          '<div><button id="node-create-btn">Зарегистрировать ноду</button></div>' +
+          "</div>";
+        document.getElementById("node-create-btn").addEventListener("click", function () {
+          var name = document.getElementById("node-name").value.trim() || "node-1";
+          var maxKeys = parseInt(document.getElementById("node-maxkeys").value, 10) || 500;
+          api("/v1/admin/nodes", { method: "POST", body: { name: name, max_keys: maxKeys } })
             .then(function (r) {
-              document.getElementById("node-token-box").innerHTML = copyBox("New node token", r.token);
-              toast("Token rotated");
+              document.getElementById("node-token-box").innerHTML = copyBox("Токен ноды", r.token);
+              toast("Нода зарегистрирована");
+              loadNode();
             }).catch(function (e) { toast(e.message, true); });
         });
+        return;
+      }
+      el.innerHTML =
+        '<dl class="info">' +
+        "<dt>Название</dt><dd>" + escapeHtml(node.Name) + "</dd>" +
+        '<dt>Статус</dt><dd><span class="badge ' + (node.Status === "active" ? "ok" : "off") + '">' +
+        (node.Status === "active" ? "активна" : escapeHtml(node.Status)) + "</span></dd>" +
+        "<dt>Лимит ключей</dt><dd>" + node.MaxKeys + "</dd>" +
+        "<dt>Последняя активность</dt><dd>" + formatDate(node.LastHeartbeatAt) + "</dd>" +
+        "</dl>" +
+        '<button class="secondary small" id="node-rotate-btn">Обновить токен</button>';
+      document.getElementById("node-rotate-btn").addEventListener("click", function () {
+        if (!confirm("Обновить токен этой ноды? Старый токен перестанет работать немедленно.")) return;
+        api("/v1/admin/nodes/" + node.ID + "/rotate-token", { method: "POST" })
+          .then(function (r) {
+            document.getElementById("node-token-box").innerHTML = copyBox("Новый токен ноды", r.token);
+            toast("Токен обновлён");
+          }).catch(function (e) { toast(e.message, true); });
       });
     }).catch(function (e) { toast(e.message, true); });
   }
-
-  document.getElementById("node-create-btn").addEventListener("click", function () {
-    var name = document.getElementById("node-name").value.trim();
-    var maxKeys = parseInt(document.getElementById("node-maxkeys").value, 10) || 500;
-    if (!name) { toast("Name is required", true); return; }
-    api("/v1/admin/nodes", { method: "POST", body: { name: name, max_keys: maxKeys } })
-      .then(function (r) {
-        document.getElementById("node-token-box").innerHTML = copyBox("Node token", r.token);
-        document.getElementById("node-name").value = "";
-        toast("Node created");
-        loadNodes();
-      }).catch(function (e) { toast(e.message, true); });
-  });
 
   // ---------- Keys ----------
   function loadKeys(ownerRef) {
     var qs = ownerRef ? ("?owner_ref=" + encodeURIComponent(ownerRef)) : "";
     api("/v1/admin/keys" + qs).then(function (keys) {
       var el = document.getElementById("keys-table");
-      if (!keys || keys.length === 0) { el.innerHTML = '<div class="empty">No keys yet.</div>'; return; }
+      if (!keys || keys.length === 0) { el.innerHTML = '<div class="empty">Пока нет ключей.</div>'; return; }
       var rows = keys.map(function (k) {
         var used = formatBytes((k.BytesSentTotal || 0) + (k.BytesReceivedTotal || 0));
-        var limit = k.TrafficLimitBytes != null ? formatBytes(k.TrafficLimitBytes) : "unlimited";
+        var limit = k.TrafficLimitBytes != null ? formatBytes(k.TrafficLimitBytes) : "без лимита";
         return (
-          "<tr><td>" + escapeHtml(k.Label || "(no label)") + "</td><td>" + shortId(k.ID) + "</td>" +
+          "<tr><td>" + escapeHtml(k.Label || "(без названия)") + "</td><td>" + shortId(k.ID) + "</td>" +
           "<td>" + escapeHtml(k.Transport) + "</td>" +
-          '<td><span class="badge ' + (k.Enabled ? "ok" : "off") + '">' + (k.Enabled ? "enabled" : "disabled") + "</span></td>" +
+          '<td><span class="badge ' + (k.Enabled ? "ok" : "off") + '">' + (k.Enabled ? "включён" : "отключён") + "</span></td>" +
           "<td>" + used + " / " + limit + "</td>" +
           "<td>" + escapeHtml(k.OwnerRef || "—") + "</td>" +
           '<td class="actions">' +
-          '<button class="secondary small" data-toggle="' + k.ID + '" data-enabled="' + k.Enabled + '">' + (k.Enabled ? "Disable" : "Enable") + "</button>" +
-          '<button class="danger small" data-delete="' + k.ID + '">Delete</button>' +
+          '<button class="secondary small" data-toggle="' + k.ID + '" data-enabled="' + k.Enabled + '">' + (k.Enabled ? "Отключить" : "Включить") + "</button>" +
+          '<button class="danger small" data-delete="' + k.ID + '">Удалить</button>' +
           "</td></tr>"
         );
       }).join("");
       el.innerHTML =
-        '<div class="table-scroll"><table><thead><tr><th>Label</th><th>ID</th><th>Transport</th><th>Status</th><th>Traffic</th><th>Owner</th><th></th></tr></thead><tbody>' +
+        '<div class="table-scroll"><table><thead><tr><th>Название</th><th>ID</th><th>Транспорт</th><th>Статус</th><th>Трафик</th><th>Владелец</th><th></th></tr></thead><tbody>' +
         rows + "</tbody></table></div>";
       el.querySelectorAll("[data-toggle]").forEach(function (btn) {
         btn.addEventListener("click", function () {
           var enable = btn.getAttribute("data-enabled") !== "true";
           api("/v1/admin/keys/" + btn.getAttribute("data-toggle") + "/" + (enable ? "enable" : "disable"), { method: "POST" })
-            .then(function () { toast(enable ? "Key enabled" : "Key disabled"); loadKeys(ownerRef); })
+            .then(function () { toast(enable ? "Ключ включён" : "Ключ отключён"); loadKeys(ownerRef); })
             .catch(function (e) { toast(e.message, true); });
         });
       });
       el.querySelectorAll("[data-delete]").forEach(function (btn) {
         btn.addEventListener("click", function () {
-          if (!confirm("Delete this key permanently?")) return;
+          if (!confirm("Удалить этот ключ навсегда?")) return;
           api("/v1/admin/keys/" + btn.getAttribute("data-delete"), { method: "DELETE" })
-            .then(function () { toast("Key deleted"); loadKeys(ownerRef); })
+            .then(function () { toast("Ключ удалён"); loadKeys(ownerRef); })
             .catch(function (e) { toast(e.message, true); });
         });
       });
@@ -397,17 +395,17 @@
     var docUrl = document.getElementById("key-docurl").value.trim();
     var limitGb = document.getElementById("key-limit").value;
     var owner = document.getElementById("key-owner").value.trim();
-    if (!docUrl) { toast("Yandex Docs URL is required", true); return; }
+    if (!docUrl) { toast("Нужна ссылка на Yandex Docs", true); return; }
     var body = { label: label, doc_url: docUrl, transport: "yandex", owner_ref: owner };
     if (limitGb) body.traffic_limit_bytes = Math.round(parseFloat(limitGb) * 1024 * 1024 * 1024);
     api("/v1/admin/keys", { method: "POST", body: body })
       .then(function (r) {
-        document.getElementById("key-token-box").innerHTML = copyBox("Key token", r.token);
+        document.getElementById("key-token-box").innerHTML = copyBox("Токен ключа", r.token);
         document.getElementById("key-label").value = "";
         document.getElementById("key-docurl").value = "";
         document.getElementById("key-limit").value = "";
         document.getElementById("key-owner").value = "";
-        toast("Key created");
+        toast("Ключ создан");
         loadKeys();
       }).catch(function (e) { toast(e.message, true); });
   });
@@ -419,25 +417,24 @@
   function loadIngestTokens() {
     api("/v1/admin/ingest-tokens").then(function (tokens) {
       var el = document.getElementById("ingest-table");
-      if (!tokens || tokens.length === 0) { el.innerHTML = '<div class="empty">No ingest tokens yet.</div>'; return; }
+      if (!tokens || tokens.length === 0) { el.innerHTML = '<div class="empty">Пока нет токенов.</div>'; return; }
       var rows = tokens.map(function (t) {
         return (
-          "<tr><td>" + escapeHtml(t.Label || "(no label)") + "</td><td>" + shortId(t.ID) + "</td>" +
-          "<td>" + escapeHtml(t.Scope) + "</td>" +
-          '<td><span class="badge ' + (t.Enabled ? "ok" : "off") + '">' + (t.Enabled ? "enabled" : "disabled") + "</span></td>" +
+          "<tr><td>" + escapeHtml(t.Label || "(без названия)") + "</td><td>" + shortId(t.ID) + "</td>" +
+          '<td><span class="badge ' + (t.Enabled ? "ok" : "off") + '">' + (t.Enabled ? "включён" : "отключён") + "</span></td>" +
           "<td>" + formatDate(t.CreatedAt) + "</td>" +
           '<td class="actions"><button class="secondary small" data-toggle="' + t.ID + '" data-enabled="' + t.Enabled + '">' +
-          (t.Enabled ? "Disable" : "Enable") + "</button></td></tr>"
+          (t.Enabled ? "Отключить" : "Включить") + "</button></td></tr>"
         );
       }).join("");
       el.innerHTML =
-        '<div class="table-scroll"><table><thead><tr><th>Label</th><th>ID</th><th>Scope</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>' +
+        '<div class="table-scroll"><table><thead><tr><th>Название</th><th>ID</th><th>Статус</th><th>Создан</th><th></th></tr></thead><tbody>' +
         rows + "</tbody></table></div>";
       el.querySelectorAll("[data-toggle]").forEach(function (btn) {
         btn.addEventListener("click", function () {
           var enable = btn.getAttribute("data-enabled") !== "true";
           api("/v1/admin/ingest-tokens/" + btn.getAttribute("data-toggle") + "/" + (enable ? "enable" : "disable"), { method: "POST" })
-            .then(function () { toast(enable ? "Token enabled" : "Token disabled"); loadIngestTokens(); })
+            .then(function () { toast(enable ? "Токен включён" : "Токен отключён"); loadIngestTokens(); })
             .catch(function (e) { toast(e.message, true); });
         });
       });
@@ -448,9 +445,9 @@
     var label = document.getElementById("ingest-label").value.trim();
     api("/v1/admin/ingest-tokens", { method: "POST", body: { label: label, scope: "keys:write" } })
       .then(function (r) {
-        document.getElementById("ingest-token-box").innerHTML = copyBox("Ingest token", r.token);
+        document.getElementById("ingest-token-box").innerHTML = copyBox("Токен для интеграции", r.token);
         document.getElementById("ingest-label").value = "";
-        toast("Ingest token created");
+        toast("Токен создан");
         loadIngestTokens();
       }).catch(function (e) { toast(e.message, true); });
   });
@@ -470,8 +467,8 @@
     document.getElementById("login-view").classList.add("hidden");
     document.getElementById("app-view").classList.remove("hidden");
     document.getElementById("logout-btn").classList.remove("hidden");
-    loadNodes();
     loadKeys();
+    loadNode();
     loadIngestTokens();
   }
   function showLogin() {
@@ -487,7 +484,7 @@
     // Confirm the token actually works before declaring success.
     api("/v1/admin/nodes").then(function () { showApp(); }).catch(function () {
       clearToken();
-      toast("Invalid admin token", true);
+      toast("Неверный токен администратора", true);
     });
   });
   document.getElementById("login-token").addEventListener("keydown", function (e) {

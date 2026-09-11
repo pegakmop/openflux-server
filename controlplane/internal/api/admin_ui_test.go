@@ -21,7 +21,7 @@ func TestHandleAdminUIServesEmbeddedHTML(t *testing.T) {
 			t.Errorf("%s: Content-Type = %q, want text/html prefix", path, ct)
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, "OpenFlux Control Plane") {
+		if !strings.Contains(body, "Панель управления OpenFlux") {
 			t.Errorf("%s: body missing expected title text", path)
 		}
 		if !strings.Contains(body, "/v1/admin/nodes") {
