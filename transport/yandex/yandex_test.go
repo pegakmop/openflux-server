@@ -1,0 +1,268 @@
+package yandex
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"universal-bypass-tool/transport"
+)
+
+// --- backoffDelay -----------------------------------------------------
+
+func TestBackoffDelayGrowsAndCaps(t *testing.T) {
+	tr := NewYandexDocsTransport("http://example.invalid", transport.TransportConfig{
+		ReconnectDelay:      100 * time.Millisecond,
+		ReconnectMultiplier: 2,
+		MaxReconnectDelay:   1 * time.Second,
+	})
+
+	got0 := tr.backoffDelay(0)
+	got1 := tr.backoffDelay(1)
+	got2 := tr.backoffDelay(2)
+	gotCapped := tr.backoffDelay(10)
+
+	if got0 != 100*time.Millisecond {
+		t.Errorf("backoffDelay(0) = %v, want 100ms", got0)
+	}
+	if got1 != 200*time.Millisecond {
+		t.Errorf("backoffDelay(1) = %v, want 200ms", got1)
+	}
+	if got2 != 400*time.Millisecond {
+		t.Errorf("backoffDelay(2) = %v, want 400ms", got2)
+	}
+	if gotCapped != 1*time.Second {
+		t.Errorf("backoffDelay(10) = %v, want capped at 1s", gotCapped)
+	}
+}
+
+func TestBackoffDelayZeroWhenDisabled(t *testing.T) {
+	tr := NewYandexDocsTransport("http://example.invalid", transport.TransportConfig{
+		ReconnectDelay: 0,
+	})
+	if got := tr.backoffDelay(5); got != 0 {
+		t.Errorf("backoffDelay with ReconnectDelay=0 = %v, want 0", got)
+	}
+}
+
+// --- fetchDocInfo: must never panic on a malformed page ----------------
+
+func TestFetchDocInfoMalformedConfigReturnsErrorNotPanic(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"no client-config script at all", `<html><body>error page</body></html>`},
+		{"invalid json", `<script id="client-config">{not json`},
+		{"missing officeActionData", `<script id="client-config">{"foo":1}</script>`},
+		{"officeActionData wrong type", `<script id="client-config">{"officeActionData":"nope"}</script>`},
+		{"nil editor_config", `<script id="client-config">{"officeActionData":{"editor_config":null}}</script>`},
+		{
+			"missing balancer_url",
+			`<script id="client-config">{"officeActionData":{"editor_config":{"document":{"key":"k"},"token":"t"}}}</script>`,
+		},
+		{
+			"document wrong type",
+			`<script id="client-config">{"officeActionData":{"balancer_url":"https://x","editor_config":{"document":"nope","token":"t"}}}</script>`,
+		},
+		{
+			"missing token",
+			`<script id="client-config">{"officeActionData":{"balancer_url":"https://x","editor_config":{"document":{"key":"k"}}}}</script>`,
+		},
+		{
+			"missing document key",
+			`<script id="client-config">{"officeActionData":{"balancer_url":"https://x","editor_config":{"document":{},"token":"t"}}}</script>`,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+
+			tr := NewYandexDocsTransport(srv.URL, transport.DefaultConfig())
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("fetchDocInfo panicked: %v", r)
+				}
+			}()
+
+			_, err := tr.fetchDocInfo(srv.URL, "user1")
+			if err == nil {
+				t.Fatalf("expected an error for malformed config, got nil")
+			}
+		})
+	}
+}
+
+func TestFetchDocInfoValidConfig(t *testing.T) {
+	body := `<script id="client-config">{"officeActionData":{"balancer_url":"https://balancer.example",` +
+		`"editor_config":{"token":"tok123","document":{"key":"doc-key-1","fileType":"docx","url":"https://x/doc","title":"T"}}}}</script>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	tr := NewYandexDocsTransport(srv.URL, transport.DefaultConfig())
+	info, err := tr.fetchDocInfo(srv.URL, "user1")
+	if err != nil {
+		t.Fatalf("fetchDocInfo: %v", err)
+	}
+	if info.Token != "tok123" {
+		t.Errorf("Token = %q, want tok123", info.Token)
+	}
+	if info.DocID != "doc-key-1" {
+		t.Errorf("DocID = %q, want doc-key-1", info.DocID)
+	}
+	if info.Host != "balancer.example" {
+		t.Errorf("Host = %q, want balancer.example", info.Host)
+	}
+	if !strings.Contains(info.WsURL, "doc-key-1") {
+		t.Errorf("WsURL = %q, want it to contain the doc key", info.WsURL)
+	}
+}
+
+// --- performHandshake: exercises the actual protocol sequencing fix ----
+
+var upgrader = websocket.Upgrader{}
+
+// serveHandshakeServer spins up a real WS server playing the
+// Yandex/OnlyOffice side of the engine.io/socket.io handshake; respond
+// drives what it sends/expects for a given test.
+func serveHandshakeServer(t *testing.T, respond func(conn *websocket.Conn)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("server upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		respond(conn)
+	}))
+}
+
+func dialTestServer(t *testing.T, srv *httptest.Server) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return conn
+}
+
+func TestPerformHandshakeSuccessWaitsForAck(t *testing.T) {
+	const token = "expected-token-123"
+	ackSentAfterConnect := make(chan struct{}, 1)
+
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		// 1. engine.io open packet, with explicit ping settings.
+		open, _ := json.Marshal(map[string]int{"pingInterval": 25000, "pingTimeout": 5000})
+		conn.WriteMessage(websocket.TextMessage, append([]byte("0"), open...))
+
+		// 2. Must receive the namespace-connect BEFORE sending the ack -
+		// this is exactly the ordering the original bug violated.
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("server read: %v", err)
+			return
+		}
+		if !strings.HasPrefix(string(msg), "40") {
+			t.Errorf("expected a 40<json> namespace-connect frame, got %q", msg)
+			return
+		}
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(msg[2:], &payload); err != nil {
+			t.Errorf("server: bad namespace-connect payload: %v", err)
+			return
+		}
+		if payload.Token != token {
+			t.Errorf("namespace-connect token = %q, want %q", payload.Token, token)
+		}
+
+		// A mid-handshake ping - the client must answer it without
+		// mistaking it for the ack and without giving up.
+		conn.WriteMessage(websocket.TextMessage, []byte("2"))
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, pong, err := conn.ReadMessage()
+		if err != nil || string(pong) != "3" {
+			t.Errorf("expected a pong (%q) in response to the mid-handshake ping, got %q, err=%v", "3", pong, err)
+		}
+
+		// 3. Only now send the ack.
+		close(ackSentAfterConnect)
+		conn.WriteMessage(websocket.TextMessage, []byte(`40{"sid":"server-sid"}`))
+
+		time.Sleep(50 * time.Millisecond) // let the client finish reading before we close
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	readTimeout, err := tr.performHandshake(conn, token)
+	if err != nil {
+		t.Fatalf("performHandshake: %v", err)
+	}
+	if readTimeout != 30*time.Second {
+		t.Errorf("readTimeout = %v, want 30s (25000+5000ms from the open packet)", readTimeout)
+	}
+
+	select {
+	case <-ackSentAfterConnect:
+	default:
+		t.Fatalf("server never reached the point of sending the ack - performHandshake returned too early")
+	}
+}
+
+func TestPerformHandshakeFailsOnConnectError(t *testing.T) {
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		open, _ := json.Marshal(map[string]int{"pingInterval": 25000, "pingTimeout": 20000})
+		conn.WriteMessage(websocket.TextMessage, append([]byte("0"), open...))
+		conn.ReadMessage() // the namespace-connect frame
+		conn.WriteMessage(websocket.TextMessage, []byte(`44{"message":"not authorized"}`))
+		time.Sleep(50 * time.Millisecond)
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	_, err := tr.performHandshake(conn, "any-token")
+	if err == nil {
+		t.Fatalf("expected an error for a socket.io connect-error response")
+	}
+}
+
+func TestPerformHandshakeDoesNotSendConnectBeforeOpen(t *testing.T) {
+	// If the client sent its namespace-connect before the server's open
+	// packet arrived, this handler would see it as the very first frame
+	// and fail the test - reproducing the original race directly.
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if _, _, err := conn.ReadMessage(); err == nil {
+			t.Errorf("client sent a frame before the server's open packet was ever written")
+		}
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	_, _ = tr.performHandshake(conn, "any-token") // expected to fail once the server closes; that's fine here
+}

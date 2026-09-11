@@ -10,6 +10,7 @@ type TransportConfig struct {
 	MaxReconnectAttempts int
 	ReconnectDelay       time.Duration
 	ReconnectMultiplier  float64
+	MaxReconnectDelay    time.Duration
 	MaxQueueSize         int
 	KeepAliveInterval    time.Duration
 }
@@ -36,10 +37,17 @@ type TransportStats struct {
 func DefaultConfig() TransportConfig {
 	return TransportConfig{
 		MaxReconnectAttempts: 999999,
-		ReconnectDelay:       0,
-		ReconnectMultiplier:  1.1,
-		MaxQueueSize:         1024,
-		KeepAliveInterval:    10 * time.Second,
+		// A previous version of this config carried ReconnectDelay: 0, which
+		// made the (already-unused-until-now) exponential backoff a permanent
+		// no-op: 0 * anything is still 0. Transports now actually apply
+		// this - see yandex.(*YandexDocsTransport).backoffDelay - so a
+		// failing connection retries with real, growing delays instead of
+		// hammering the server in a tight loop.
+		ReconnectDelay:      500 * time.Millisecond,
+		ReconnectMultiplier: 1.6,
+		MaxReconnectDelay:   30 * time.Second,
+		MaxQueueSize:        1024,
+		KeepAliveInterval:   10 * time.Second,
 	}
 }
 

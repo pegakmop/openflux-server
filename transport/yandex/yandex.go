@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -18,6 +19,17 @@ import (
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
 )
+
+// defaultPingWindow is used when the server's engine.io "open" packet can't
+// be parsed for its own pingInterval/pingTimeout (see performHandshake) -
+// 25s+20s matches Socket.IO's own common server-side defaults.
+const defaultPingWindow = 45 * time.Second
+
+// handshakeTimeout bounds how long connectToDoc waits for the engine.io
+// open packet and the socket.io namespace-connect ack before giving up and
+// reconnecting - see the package-level doc comment on performHandshake for
+// why this handshake has to be awaited at all.
+const handshakeTimeout = 15 * time.Second
 
 type YandexDocsInfo struct {
 	CookieStr   string
@@ -49,8 +61,8 @@ func (s *DocSession) safeWrite(messageType int, data []byte) error {
 type YandexDocsTransport struct {
 	*transport.BaseTransport
 
-	url      string
-	session  *DocSession
+	url     string
+	session *DocSession
 
 	userCounter atomic.Int32
 	baseUserID  string
@@ -104,7 +116,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		return
 	}
 
-	utils.Debugf("[YDOCS] connectToDoc attempt ...")
+	utils.Debugf("[YDOCS] connectToDoc attempt %d", attempt)
 
 	go func() {
 		t.Mu.Lock()
@@ -126,7 +138,10 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			return
 		}
 
-		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+		dialer := websocket.Dialer{
+			HandshakeTimeout:  10 * time.Second,
+			EnableCompression: true, // negotiated (permessage-deflate); harmless if the server ignores it
+		}
 		headers := http.Header{}
 		headers.Set("User-Agent", "Mozilla/5.0")
 		headers.Set("Origin", info.Origin)
@@ -136,6 +151,22 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		conn, _, err := dialer.Dial(info.WsURL, headers)
 		if err != nil {
 			utils.Debugf("[YDOCS] WebSocket dial failed: %v", err)
+			t.scheduleReconnect(attempt)
+			return
+		}
+
+		// The engine.io/socket.io handshake must complete (open packet,
+		// then our namespace-connect, then the server's connect ack)
+		// before anything else goes over this socket. Sending the auth
+		// event packet (or, worse, real tunneled data once writerLoop
+		// starts draining the queue) ahead of that ack lands it in a
+		// namespace the server hasn't confirmed yet, which is exactly what
+		// was making OnlyOffice's backend tear the connection down with
+		// close code 1005 in a loop.
+		readTimeout, err := t.performHandshake(conn, info.Token)
+		if err != nil {
+			utils.Debugf("[YDOCS] handshake failed: %v", err)
+			conn.Close()
 			t.scheduleReconnect(attempt)
 			return
 		}
@@ -158,12 +189,8 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		t.Mu.Unlock()
 
 		if existingSession == nil {
-			go t.writerLoop()
+			go t.writerLoop(writeQueue)
 		}
-
-		// Auth - use safeWrite
-		auth1 := fmt.Sprintf(`40{"token":"%s"}`, info.Token)
-		session.safeWrite(websocket.TextMessage, []byte(auth1))
 
 		authData := map[string]interface{}{
 			"type": "auth", "docid": info.DocID, "token": "fghhfgsjdgfjs",
@@ -171,10 +198,24 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			"lastOtherSaveTime": -1, "permissions": info.Permissions,
 			"openCmd": info.OpenCmd, "coEditingMode": "fast", "jwtOpen": info.Token,
 		}
-		messagePart, _ := json.Marshal([]interface{}{"message", authData})
-		session.safeWrite(websocket.TextMessage, []byte(fmt.Sprintf("42%s", string(messagePart))))
+		messagePart, err := json.Marshal([]interface{}{"message", authData})
+		if err != nil {
+			utils.Debugf("[YDOCS] marshal auth message failed: %v", err)
+			t.SetConnected(false)
+			conn.Close()
+			t.scheduleReconnect(attempt)
+			return
+		}
+		if err := session.safeWrite(websocket.TextMessage, []byte(fmt.Sprintf("42%s", string(messagePart)))); err != nil {
+			utils.Debugf("[YDOCS] send auth message failed: %v", err)
+			t.SetConnected(false)
+			conn.Close()
+			t.scheduleReconnect(attempt)
+			return
+		}
 
 		for t.IsRunning() {
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				utils.Debugf("[YDOCS] Read error: %v", err)
@@ -187,27 +228,94 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 	}()
 }
 
-func (t *YandexDocsTransport) writerLoop() {
-	for t.IsRunning() {
-		t.Mu.Lock()
-		session := t.session
-		t.Mu.Unlock()
+// performHandshake waits out the engine.io/socket.io connection sequence:
+//
+//  1. server -> client: engine.io "open" packet ("0{...}"), carrying the
+//     server's actual pingInterval/pingTimeout;
+//  2. client -> server: socket.io namespace-connect ("40{"token":...}"),
+//     sent only once (1) has arrived;
+//  3. server -> client: namespace-connect ack ("40{"sid":...}") or a
+//     connect-error ("44...") - only once the ack arrives is this socket
+//     actually usable for anything else.
+//
+// Engine.io pings ("2") can arrive at any point in this sequence and are
+// answered ("3") immediately regardless of handshake progress, same as in
+// steady-state. It returns the read-idle timeout to apply for the rest of
+// this connection's life (derived from the server's own ping settings so a
+// silently-dead connection is detected instead of blocking forever).
+func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token string) (time.Duration, error) {
+	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	defer conn.SetReadDeadline(time.Time{})
 
-		if session == nil || session.Conn == nil {
-			time.Sleep(10 * time.Millisecond)
+	readTimeout := defaultPingWindow
+	sentConnect := false
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return 0, fmt.Errorf("handshake read: %w", err)
+		}
+		text := string(msg)
+
+		switch {
+		case !sentConnect && strings.HasPrefix(text, "0"):
+			var openPkt struct {
+				PingInterval int `json:"pingInterval"`
+				PingTimeout  int `json:"pingTimeout"`
+			}
+			if err := json.Unmarshal([]byte(text[1:]), &openPkt); err == nil &&
+				openPkt.PingInterval > 0 && openPkt.PingTimeout > 0 {
+				readTimeout = time.Duration(openPkt.PingInterval+openPkt.PingTimeout) * time.Millisecond
+			}
+
+			authPkt, err := json.Marshal(map[string]string{"token": token})
+			if err != nil {
+				return 0, fmt.Errorf("marshal namespace-connect: %w", err)
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, append([]byte("40"), authPkt...)); err != nil {
+				return 0, fmt.Errorf("send namespace-connect: %w", err)
+			}
+			sentConnect = true
+
+		case text == "2":
+			if err := conn.WriteMessage(websocket.TextMessage, []byte("3")); err != nil {
+				return 0, fmt.Errorf("pong during handshake: %w", err)
+			}
+
+		case strings.HasPrefix(text, "44"):
+			return 0, fmt.Errorf("namespace connect rejected: %s", text)
+
+		case sentConnect && strings.HasPrefix(text, "40"):
+			return readTimeout, nil
+
+		default:
+			utils.Debugf("[YDOCS] unexpected message during handshake: %s", text)
+		}
+	}
+}
+
+func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
+	for t.IsRunning() {
+		var packet []byte
+		select {
+		case packet = <-queue:
+		case <-time.After(200 * time.Millisecond):
+			// Nothing to send; loop back around just to re-check IsRunning.
 			continue
 		}
 
-		select {
-		case packet := <-session.WriteQueue:
-			payload := base64.StdEncoding.EncodeToString(packet)
-			msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+		t.Mu.RLock()
+		session := t.session
+		t.Mu.RUnlock()
+		if session == nil || session.Conn == nil {
+			continue
+		}
 
-			if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-				utils.Debugf("[YDOCS] Write error: %v", err)
-			}
-		default:
-			time.Sleep(10 * time.Millisecond)
+		payload := base64.StdEncoding.EncodeToString(packet)
+		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+
+		if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+			utils.Debugf("[YDOCS] Write error: %v", err)
 		}
 	}
 }
@@ -227,6 +335,11 @@ func (t *YandexDocsTransport) keepAliveLoop() {
 			if err := session.safeWrite(websocket.TextMessage, []byte(keepAliveMsg)); err != nil {
 				utils.Debugf("[YDOCS] Keep-alive failed: %v", err)
 				t.SetConnected(false)
+				// Force the blocked ReadMessage() in this session's read
+				// loop to return immediately instead of waiting out the
+				// full read-deadline window, so reconnection starts right
+				// away rather than up to defaultPingWindow later.
+				session.Conn.Close()
 			}
 		}
 	}
@@ -289,13 +402,44 @@ func (t *YandexDocsTransport) extractBase64String(response string) string {
 	return ""
 }
 
+// scheduleReconnect waits out an exponential backoff (see
+// transport.DefaultConfig's ReconnectDelay/ReconnectMultiplier/
+// MaxReconnectDelay) before retrying, instead of hammering the server in a
+// tight loop every time a connection attempt fails fast.
 func (t *YandexDocsTransport) scheduleReconnect(attempt int) {
 	if !t.IsRunning() || attempt >= t.GetConfig().MaxReconnectAttempts {
 		return
 	}
 
 	t.RecordReconnect()
+
+	delay := t.backoffDelay(attempt)
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if !t.IsRunning() {
+		return
+	}
+
 	t.connectToDoc(attempt + 1)
+}
+
+func (t *YandexDocsTransport) backoffDelay(attempt int) time.Duration {
+	cfg := t.GetConfig()
+	if cfg.ReconnectDelay <= 0 {
+		return 0
+	}
+
+	multiplier := cfg.ReconnectMultiplier
+	if multiplier < 1 {
+		multiplier = 1
+	}
+
+	delay := float64(cfg.ReconnectDelay) * math.Pow(multiplier, float64(attempt))
+	if cfg.MaxReconnectDelay > 0 && delay > float64(cfg.MaxReconnectDelay) {
+		delay = float64(cfg.MaxReconnectDelay)
+	}
+	return time.Duration(delay)
 }
 
 func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, error) {
@@ -327,17 +471,47 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	}
 
 	var config map[string]interface{}
-	json.Unmarshal([]byte(matches[1]), &config)
-	officeAction := config["officeActionData"].(map[string]interface{})
+	if err := json.Unmarshal([]byte(matches[1]), &config); err != nil {
+		return YandexDocsInfo{}, fmt.Errorf("parse client-config: %w", err)
+	}
+
+	// Every lookup below used to be an unchecked type assertion
+	// (config["x"].(T)), which panics - and since this runs in a goroutine
+	// with no recover(), crashes the entire process - the moment Yandex
+	// serves a page shaped even slightly differently than expected (an
+	// error/maintenance page, an A/B-tested layout, a partly-loaded
+	// response). All of it is now checked and turned into a plain error
+	// that triggers a reconnect instead.
+	officeAction, ok := config["officeActionData"].(map[string]interface{})
+	if !ok {
+		return YandexDocsInfo{}, fmt.Errorf("officeActionData missing or malformed")
+	}
 
 	editorConfigRaw, ok := officeAction["editor_config"].(map[string]interface{})
 	if !ok || editorConfigRaw == nil {
 		return YandexDocsInfo{}, fmt.Errorf("editor_config nil - will reconnect")
 	}
 
-	balancerURL := officeAction["balancer_url"].(string)
+	balancerURL, ok := officeAction["balancer_url"].(string)
+	if !ok {
+		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing or malformed")
+	}
 	host := strings.TrimPrefix(balancerURL, "https://")
-	document := editorConfigRaw["document"].(map[string]interface{})
+
+	document, ok := editorConfigRaw["document"].(map[string]interface{})
+	if !ok {
+		return YandexDocsInfo{}, fmt.Errorf("document missing or malformed")
+	}
+
+	token, ok := editorConfigRaw["token"].(string)
+	if !ok {
+		return YandexDocsInfo{}, fmt.Errorf("editor_config.token missing or malformed")
+	}
+
+	docKey, ok := document["key"].(string)
+	if !ok {
+		return YandexDocsInfo{}, fmt.Errorf("document.key missing or malformed")
+	}
 
 	perms, _ := document["permissions"].(map[string]interface{})
 	if perms == nil {
@@ -346,15 +520,15 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 
 	return YandexDocsInfo{
 		CookieStr:   strings.Join(cookies, "; "),
-		Token:       editorConfigRaw["token"].(string),
-		DocID:       document["key"].(string),
+		Token:       token,
+		DocID:       docKey,
 		Origin:      balancerURL,
 		Host:        host,
-		WsURL:       fmt.Sprintf("wss://%s/2024.1.1-375/doc/%s/c/?EIO=4&transport=websocket", host, document["key"].(string)),
+		WsURL:       fmt.Sprintf("wss://%s/2024.1.1-375/doc/%s/c/?EIO=4&transport=websocket", host, docKey),
 		Permissions: perms,
 		OpenCmd: map[string]interface{}{
 			"c":      "open",
-			"id":     document["key"].(string),
+			"id":     docKey,
 			"userid": userID,
 			"format": document["fileType"],
 			"url":    document["url"],
