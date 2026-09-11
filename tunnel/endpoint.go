@@ -35,7 +35,12 @@ func (e *TunnelLinkEndpoint) SetOutgoingPacketHandler(fn func([]byte)) {
 
 func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 	e.packetIn.Add(1)
-	utils.Debugf("<- %d bytes - %s\n", len(data), network.ParsePacketInfo(data))
+	if utils.IsVerbose() {
+		// ParsePacketInfo parses IP/TCP headers and builds a string on every
+		// call - worth skipping when nothing will read it, since this runs
+		// once per inbound packet.
+		utils.Debugf("<- %d bytes - %s\n", len(data), network.ParsePacketInfo(data))
+	}
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(append([]byte{}, data...)),
 	})

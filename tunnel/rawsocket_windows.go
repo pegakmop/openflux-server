@@ -42,8 +42,10 @@ func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 
 	ep.SetOnPacket(func(data []byte) {
 		r.packetIn.Add(1)
-		utils.Debugf("[WD-NIC%d] <- %d bytes: %s",
-			r.nicID, len(data), network.ParsePacketInfo(data))
+		if utils.IsVerbose() {
+			utils.Debugf("[WD-NIC%d] <- %d bytes: %s",
+				r.nicID, len(data), network.ParsePacketInfo(data))
+		}
 
 		if r.dispatcher == nil {
 			return
@@ -76,8 +78,10 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 		pktCopy := make([]byte, len(ipPacket))
 		copy(pktCopy, ipPacket)
 
-		utils.Debugf("[WD-NIC%d] -> %d bytes: %s",
-			e.nicID, len(pktCopy), network.ParsePacketInfo(pktCopy))
+		if utils.IsVerbose() {
+			utils.Debugf("[WD-NIC%d] -> %d bytes: %s",
+				e.nicID, len(pktCopy), network.ParsePacketInfo(pktCopy))
+		}
 
 		if err := e.ep.Send(pktCopy); err != nil {
 			utils.Debugf("[WD-NIC%d] Send error: %v", e.nicID, err)
