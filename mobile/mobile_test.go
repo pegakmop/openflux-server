@@ -55,14 +55,18 @@ func TestBuildTransportUnsupportedTransport(t *testing.T) {
 	}
 }
 
-func TestBuildTransportKeyModeMissingFields(t *testing.T) {
-	if _, err := buildTransport(Config{Mode: "key"}, transport.DefaultConfig()); err == nil {
-		t.Fatalf("expected an error when control_url/key_token are missing")
-	}
-}
-
 func TestBuildTransportUnknownMode(t *testing.T) {
 	if _, err := buildTransport(Config{Mode: "telepathy"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error for an unknown mode")
+	}
+}
+
+func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
+	// "key" mode used to make StartTunnel itself resolve a controlplane
+	// token into a doc_url over a live, unshielded HTTPS request - removed
+	// because that request had no disguise and was trivial to block. Any
+	// caller still sending it should get a clear error, not silent misuse.
+	if _, err := buildTransport(Config{Mode: "key", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
+		t.Fatalf(`expected an error for the removed "key" mode`)
 	}
 }

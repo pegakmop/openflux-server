@@ -140,8 +140,9 @@ Only `doc_url` is required; `transport` defaults to `"yandex"`;
 {"id": "9c2f...", "token": "of_key_...", "deep_link": "openflux://import?data=eyJuYW1lIj..."}
 ```
 `deep_link` is only present when the server has `CONTROLPLANE_PUBLIC_URL` configured - tapping it
-opens the Android app straight to a prefilled "key" mode profile (see openflux-app's
-`data/ProfileDeepLink.kt`). Omitted entirely otherwise.
+opens the Android app straight to a prefilled profile (see openflux-app's
+`data/ProfileDeepLink.kt`), with `doc_url`/`transport` embedded directly so the app can connect
+without ever calling `/v1/resolve` below. Omitted entirely otherwise.
 
 ### `GET /v1/admin/keys` — list keys
 
@@ -207,7 +208,8 @@ usage stats) is untouched.
 {"token": "of_key_...", "deep_link": "openflux://import?data=eyJuYW1lIj..."}
 ```
 `deep_link` follows the same rule as key creation (present only with `CONTROLPLANE_PUBLIC_URL`
-configured). `404` if `{id}` doesn't exist.
+configured), with the key's current `doc_url`/`transport` embedded the same way. `404` if `{id}`
+doesn't exist.
 
 ## Admin: ingest tokens
 
@@ -333,6 +335,15 @@ the only thing today's `Status` field/UI rely on to infer liveness.
 Auth: `Authorization: Bearer <key token>`. Rate-limited per source IP
 (`CONTROLPLANE_RATE_LIMIT_RPS`, default 1 request/second, small burst) —
 this is the one endpoint an untrusted client token hits directly.
+
+The Android app no longer calls this to connect - `doc_url`/`transport` come pre-embedded in the
+deep link (see above), so a normal connect makes no direct request to this server at all, which a
+network already blocking direct access to it (the exact scenario this tool exists for) can't
+interfere with. The app only calls this endpoint for its optional, user-initiated "check key"
+action in the profile editor, to preview status/quota or to populate `doc_url` for a profile that
+was entered by hand instead of imported from a deep link. Disabling a key or changing its traffic
+limit therefore has no effect on a client that already has a cached `doc_url` - it only affects
+keys a client hasn't resolved yet.
 
 ```json
 // 200 response — active key

@@ -46,22 +46,24 @@ type Callback interface {
 }
 
 // Config is the JSON contract for StartTunnel, mirroring one Android
-// profile's connection fields.
+// profile's connection fields. There used to be a second "key" mode where
+// StartTunnel itself resolved a controlplane key token into a doc_url via a
+// live HTTPS request (see resolve.go's ResolveKey) - that request had none
+// of the tunnel's own disguise and was trivial for a hostile network to
+// block outright, so the Android app now resolves once (an explicit,
+// user-initiated action - see ProfileEditScreen's "check key") and caches
+// the result, always calling StartTunnel with the plain doc_url below.
+// ResolveKey itself is unchanged and still used for that one-off check.
 type Config struct {
-	Mode string `json:"mode"` // "key" (via controlplane) or "manual"
+	Mode string `json:"mode"` // must be "manual" - see buildTransport
 
-	// mode == "key"
-	ControlURL string `json:"control_url"`
-	KeyToken   string `json:"key_token"`
-
-	// mode == "manual"
 	Transport string `json:"transport"` // "yandex" (default) or "max"
-	DocURL    string `json:"doc_url"`   // manual + yandex
-	MaxToken  string `json:"max_token"` // manual + max: your MAX account's own auth token
-	MaxUID    int64  `json:"max_uid"`   // manual + max: the contact's user ID to place the call to
+	DocURL    string `json:"doc_url"`   // yandex
+	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
+	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
 
-	// Applies to both modes. MTU is informational here - the caller applies
-	// it to the Android VpnService.Builder itself before opening the TUN fd.
+	// MTU is informational here - the caller applies it to the Android
+	// VpnService.Builder itself before opening the TUN fd.
 	MTU         int    `json:"mtu"`
 	DNSUpstream string `json:"dns_upstream"`
 }
@@ -163,50 +165,29 @@ func StopTunnel() error {
 
 // buildTransport picks and constructs the concrete transport for cfg,
 // without starting it - StartTunnel wraps the result (compression, event
-// callback) before calling Start. controlplane-managed keys ("key" mode)
-// are Yandex-only today (see nodeagent); "max" is only reachable via
-// "manual" mode, where the user supplies their own MAX credentials
-// directly instead of getting them handed out by a controlplane key.
+// callback) before calling Start.
 func buildTransport(cfg Config, transportConfig transport.TransportConfig) (transport.Transport, error) {
-	switch cfg.Mode {
-	case "key":
-		if cfg.ControlURL == "" || cfg.KeyToken == "" {
-			return nil, fmt.Errorf(`mode "key" requires control_url and key_token`)
-		}
-		_, parsed, rerr := resolveRaw(cfg.ControlURL, cfg.KeyToken)
-		if rerr != nil {
-			return nil, rerr
-		}
-		if parsed.Status != "active" {
-			return nil, fmt.Errorf("key is %s", parsed.Status)
-		}
-		if parsed.Transport != "" && parsed.Transport != "yandex" {
-			return nil, fmt.Errorf("unsupported transport %q for this client", parsed.Transport)
-		}
-		return yandex.NewYandexDocsTransport(parsed.DocURL, transportConfig), nil
+	if cfg.Mode != "manual" {
+		return nil, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
+	}
 
-	case "manual":
-		t := cfg.Transport
-		if t == "" {
-			t = "yandex"
+	t := cfg.Transport
+	if t == "" {
+		t = "yandex"
+	}
+	switch t {
+	case "yandex":
+		if cfg.DocURL == "" {
+			return nil, fmt.Errorf("doc_url is required")
 		}
-		switch t {
-		case "yandex":
-			if cfg.DocURL == "" {
-				return nil, fmt.Errorf("manual mode requires doc_url")
-			}
-			return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), nil
-		case "max":
-			if cfg.MaxToken == "" || cfg.MaxUID == 0 {
-				return nil, fmt.Errorf("the max transport requires max_token and max_uid")
-			}
-			return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), nil
-		default:
-			return nil, fmt.Errorf("unsupported transport %q for this client", t)
+		return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), nil
+	case "max":
+		if cfg.MaxToken == "" || cfg.MaxUID == 0 {
+			return nil, fmt.Errorf("the max transport requires max_token and max_uid")
 		}
-
+		return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), nil
 	default:
-		return nil, fmt.Errorf(`config.mode must be "key" or "manual", got %q`, cfg.Mode)
+		return nil, fmt.Errorf("unsupported transport %q for this client", t)
 	}
 }
 

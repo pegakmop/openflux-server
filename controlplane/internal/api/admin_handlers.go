@@ -174,7 +174,7 @@ func (a *App) handleRotateKeyToken(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, rotateKeyTokenResponse{
 		Token:    token,
-		DeepLink: buildDeepLink(a.Config.PublicBaseURL, k.Label, token),
+		DeepLink: buildDeepLink(a.Config.PublicBaseURL, k.Label, token, k.DocURL, k.Transport),
 	})
 }
 

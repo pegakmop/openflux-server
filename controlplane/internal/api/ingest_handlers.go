@@ -98,7 +98,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		created = append(created, createdKey{
 			ID:       k.ID,
 			Token:    token,
-			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token),
+			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token, req.DocURL, req.Transport),
 		})
 	}
 
