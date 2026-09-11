@@ -18,6 +18,7 @@ require (
 	github.com/pion/webrtc/v3 v3.3.6
 	github.com/wlynxg/anet v0.0.5
 	github.com/xjasonlyu/windivert-go v0.0.0-20201010013527-4239d0afa76f
+	golang.org/x/crypto v0.57.0
 )
 
 require (
@@ -40,7 +41,6 @@ require (
 	github.com/pion/turn/v2 v2.1.6 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/stretchr/testify v1.9.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
