@@ -24,6 +24,22 @@ func TestBuildTransportManualMissingDocURL(t *testing.T) {
 	}
 }
 
+func TestBuildTransportManualVolga(t *testing.T) {
+	trans, err := buildTransport(Config{Mode: "manual", Transport: "volga", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
+	if err != nil {
+		t.Fatalf("buildTransport: %v", err)
+	}
+	if _, ok := trans.(*yandex.YandexVolgaTransport); !ok {
+		t.Errorf("got %T, want *yandex.YandexVolgaTransport", trans)
+	}
+}
+
+func TestBuildTransportVolgaMissingDocURL(t *testing.T) {
+	if _, err := buildTransport(Config{Mode: "manual", Transport: "volga"}, transport.DefaultConfig()); err == nil {
+		t.Fatalf("expected an error when doc_url is missing")
+	}
+}
+
 func TestBuildTransportManualMax(t *testing.T) {
 	trans, err := buildTransport(
 		Config{Mode: "manual", Transport: "max", MaxToken: "tok", MaxUID: 12345},

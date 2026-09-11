@@ -57,8 +57,8 @@ type Callback interface {
 type Config struct {
 	Mode string `json:"mode"` // must be "manual" - see buildTransport
 
-	Transport string `json:"transport"` // "yandex" (default) or "max"
-	DocURL    string `json:"doc_url"`   // yandex
+	Transport string `json:"transport"` // "yandex" (default), "volga", or "max"
+	DocURL    string `json:"doc_url"`   // yandex, volga
 	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
 	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
 
@@ -181,6 +181,11 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 			return nil, fmt.Errorf("doc_url is required")
 		}
 		return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), nil
+	case "volga":
+		if cfg.DocURL == "" {
+			return nil, fmt.Errorf("doc_url is required")
+		}
+		return yandex.NewYandexVolgaTransport(cfg.DocURL, transportConfig), nil
 	case "max":
 		if cfg.MaxToken == "" || cfg.MaxUID == 0 {
 			return nil, fmt.Errorf("the max transport requires max_token and max_uid")

@@ -226,6 +226,12 @@
       <div class="row">
         <div><label for="key-label">Название</label><input id="key-label" placeholder="user-42" /></div>
         <div><label for="key-docurl">Ссылка на Yandex Docs</label><input id="key-docurl" placeholder="https://docs.yandex.ru/..." /></div>
+        <div><label for="key-transport">Транспорт</label>
+          <select id="key-transport">
+            <option value="yandex">yandex</option>
+            <option value="volga">volga</option>
+          </select>
+        </div>
         <div><label for="key-limit">Лимит трафика, ГБ (пусто = без лимита)</label><input id="key-limit" type="number" min="0" /></div>
         <div><label for="key-owner">Владелец (необязательно)</label><input id="key-owner" placeholder="customer-id" /></div>
         <div><button id="key-create-btn">Создать</button></div>
@@ -458,10 +464,11 @@
   document.getElementById("key-create-btn").addEventListener("click", function () {
     var label = document.getElementById("key-label").value.trim();
     var docUrl = document.getElementById("key-docurl").value.trim();
+    var transport = document.getElementById("key-transport").value;
     var limitGb = document.getElementById("key-limit").value;
     var owner = document.getElementById("key-owner").value.trim();
     if (!docUrl) { toast("Нужна ссылка на Yandex Docs", true); return; }
-    var body = { label: label, doc_url: docUrl, transport: "yandex", owner_ref: owner };
+    var body = { label: label, doc_url: docUrl, transport: transport, owner_ref: owner };
     if (limitGb) body.traffic_limit_bytes = Math.round(parseFloat(limitGb) * 1024 * 1024 * 1024);
     api("/v1/admin/keys", { method: "POST", body: body })
       .then(function (r) {
