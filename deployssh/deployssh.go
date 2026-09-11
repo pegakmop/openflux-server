@@ -79,6 +79,16 @@ type Callback interface {
 	// handshake completes, whether or not a KnownHostKeyFingerprint was
 	// supplied - the caller should persist it for next time.
 	OnHostKeyFingerprint(fingerprint string)
+	// OnDeployResult is called once, near the end of a successful run, with
+	// the values install.sh prints in its final machine-readable summary
+	// line (see resultLinePrefix). adminToken echoes back opts.AdminToken;
+	// panelURL and nodeToken are not otherwise known to the caller -
+	// nodeToken in particular is generated remotely and, like every other
+	// token this API issues, shown exactly once - so this is the only
+	// chance to capture it. nodeToken is empty if opts.RegisterNode was
+	// false or node registration failed (install.sh warns but doesn't
+	// abort in that case).
+	OnDeployResult(panelURL, adminToken, nodeToken string)
 }
 
 // Deploy connects to target and runs install.sh there with opts applied as
@@ -188,13 +198,37 @@ func buildAuthMethod(target SSHTarget) (ssh.AuthMethod, error) {
 	}
 }
 
+// resultLinePrefix marks install.sh's one machine-readable output line
+// (space-separated key=value pairs, appended after its human-readable
+// summary) - see deploy/install.sh's final SUMMARY block. Lines with this
+// prefix are reported via Callback.OnDeployResult instead of OnLog, since
+// they're not meant for a human reading the deploy log.
+const resultLinePrefix = "OPENFLUX_DEPLOY_RESULT "
+
 func streamLines(r io.Reader, cb Callback, wg *sync.WaitGroup) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		cb.OnLog(scanner.Text())
+		line := scanner.Text()
+		if fields, ok := strings.CutPrefix(line, resultLinePrefix); ok {
+			reportDeployResult(fields, cb)
+			continue
+		}
+		cb.OnLog(line)
 	}
+}
+
+func reportDeployResult(fields string, cb Callback) {
+	values := make(map[string]string)
+	for _, tok := range strings.Fields(fields) {
+		key, value, ok := strings.Cut(tok, "=")
+		if !ok {
+			continue
+		}
+		values[key] = value
+	}
+	cb.OnDeployResult(values["panel_url"], values["admin_token"], values["node_token"])
 }
 
 // buildRemoteCommand fetches install.sh and runs it with every DeployOptions
@@ -253,5 +287,6 @@ func shellQuote(s string) string {
 
 type noopCallback struct{}
 
-func (noopCallback) OnLog(string)                {}
-func (noopCallback) OnHostKeyFingerprint(string) {}
+func (noopCallback) OnLog(string)                          {}
+func (noopCallback) OnHostKeyFingerprint(string)           {}
+func (noopCallback) OnDeployResult(string, string, string) {}

@@ -46,6 +46,7 @@ type deployOptionsJSON struct {
 type DeployCallback interface {
 	OnLog(line string)
 	OnHostKeyFingerprint(fingerprint string)
+	OnDeployResult(panelURL, adminToken, nodeToken string)
 }
 
 // Deploy runs openflux-deploy's install.sh on the target described by
@@ -108,5 +109,11 @@ func (a deployCallbackAdapter) OnLog(line string) {
 func (a deployCallbackAdapter) OnHostKeyFingerprint(fingerprint string) {
 	if a.cb != nil {
 		a.cb.OnHostKeyFingerprint(fingerprint)
+	}
+}
+
+func (a deployCallbackAdapter) OnDeployResult(panelURL, adminToken, nodeToken string) {
+	if a.cb != nil {
+		a.cb.OnDeployResult(panelURL, adminToken, nodeToken)
 	}
 }

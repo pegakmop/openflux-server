@@ -76,6 +76,11 @@ type testCallback struct {
 	mu          sync.Mutex
 	lines       []string
 	fingerprint string
+	result      *deployResult
+}
+
+type deployResult struct {
+	panelURL, adminToken, nodeToken string
 }
 
 func (c *testCallback) OnLog(line string) {
@@ -90,10 +95,22 @@ func (c *testCallback) OnHostKeyFingerprint(fp string) {
 	c.fingerprint = fp
 }
 
+func (c *testCallback) OnDeployResult(panelURL, adminToken, nodeToken string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.result = &deployResult{panelURL: panelURL, adminToken: adminToken, nodeToken: nodeToken}
+}
+
 func (c *testCallback) Lines() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.lines...)
+}
+
+func (c *testCallback) Result() *deployResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.result
 }
 
 func generateHostSigner(t *testing.T) ssh.Signer {
@@ -314,6 +331,40 @@ func TestDeployKeyAuth(t *testing.T) {
 	target := SSHTarget{Host: host, Port: port, Username: "root", AuthMethod: "key", PrivateKeyPEM: clientPEM}
 	if err := Deploy(target, DeployOptions{}, cb); err != nil {
 		t.Fatalf("Deploy with key auth: %v", err)
+	}
+}
+
+func TestDeploySuccessReportsResultLineAndHidesItFromLog(t *testing.T) {
+	hostSigner := generateHostSigner(t)
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) { return nil, nil },
+	}
+	addr := startTestSSHServer(t, config, hostSigner, func(cmd string, stdout, stderr io.Writer) int {
+		fmt.Fprintln(stdout, "installing packages")
+		fmt.Fprintln(stdout, "OPENFLUX_DEPLOY_RESULT panel_url=https://1.2.3.4/admin/ admin_token=admtok node_token=nodetok")
+		fmt.Fprintln(stdout, "done")
+		return 0
+	})
+	host, port := splitHostPort(t, addr)
+
+	cb := &testCallback{}
+	target := SSHTarget{Host: host, Port: port, Username: "root", AuthMethod: "password", Password: "x"}
+	if err := Deploy(target, DeployOptions{}, cb); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	result := cb.Result()
+	if result == nil {
+		t.Fatalf("OnDeployResult was never called")
+	}
+	if result.panelURL != "https://1.2.3.4/admin/" || result.adminToken != "admtok" || result.nodeToken != "nodetok" {
+		t.Errorf("result = %+v, want panel_url=https://1.2.3.4/admin/ admin_token=admtok node_token=nodetok", *result)
+	}
+
+	for _, line := range cb.Lines() {
+		if strings.Contains(line, "OPENFLUX_DEPLOY_RESULT") {
+			t.Errorf("the machine-readable result line should not also be reported via OnLog: %q", line)
+		}
 	}
 }
 

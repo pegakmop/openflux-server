@@ -2,6 +2,8 @@
 
 **English** | [Русский](README.ru.md)
 
+Full HTTP API reference: [API.md](API.md) ([Русский](API.ru.md)).
+
 Multi-tenant key/token management, traffic accounting, and node coordination for OpenFlux exit
 nodes. This is a separate Go module and a separately deployed service — it does not carry or
 relay any tunneled traffic itself; that still flows directly between client and exit node over
@@ -34,10 +36,12 @@ CONTROLPLANE_ADMIN_TOKEN="$(openssl rand -hex 32)" \
 ## Admin panel
 
 A self-contained web UI (no build step, no external assets — `internal/api/web/admin.html`,
-embedded into the binary) is served at `/admin/`. It's a thin client over the same `/v1/admin/*`
-JSON API described below: paste `CONTROLPLANE_ADMIN_TOKEN` in once (kept in the browser's
-`localStorage`), then create/list/enable/disable nodes, keys, and ingest tokens from tabs instead
-of curl. `deploy/install.sh` puts this behind Nginx with a Let's Encrypt certificate.
+embedded into the binary) is served at `/admin/`, in Russian. It's a thin client over the same
+`/v1/admin/*` JSON API described below: paste `CONTROLPLANE_ADMIN_TOKEN` in once (kept in the
+browser's `localStorage`), then a "Keys" tab covers create/list/filter/enable/disable/delete, and
+a "Settings" tab covers the one exit node this deployment registered (status, heartbeat, rotate its
+token) plus ingest-token management. `deploy/install.sh` puts this behind Nginx with a Let's
+Encrypt certificate.
 
 ## Concepts
 
