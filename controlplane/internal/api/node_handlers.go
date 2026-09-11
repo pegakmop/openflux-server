@@ -20,7 +20,7 @@ func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
 
 	keys, err := a.Store.ListActiveKeysForNode(r.Context(), n.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list keys failed")
+		writeInternalError(w, r, "list keys failed", err)
 		return
 	}
 
@@ -72,7 +72,7 @@ func (a *App) handleNodeUsage(w http.ResponseWriter, r *http.Request) {
 
 	disabledNow, err := a.Store.ApplyUsageDeltas(r.Context(), deltas)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "apply usage failed")
+		writeInternalError(w, r, "apply usage failed", err)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (a *App) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "heartbeat failed")
+		writeInternalError(w, r, "heartbeat failed", err)
 		return
 	}
 

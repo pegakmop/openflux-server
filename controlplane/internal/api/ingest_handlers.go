@@ -77,7 +77,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 
 		token, err := auth.GenerateToken("key")
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "token generation failed")
+			writeInternalError(w, r, "token generation failed", err)
 			return
 		}
 
@@ -91,7 +91,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			ExpiresAt:         req.ExpiresAt,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "create key failed")
+			writeInternalError(w, r, "create key failed", err)
 			return
 		}
 

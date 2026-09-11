@@ -35,13 +35,13 @@ func (a *App) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 
 	token, err := auth.GenerateToken("node")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token generation failed")
+		writeInternalError(w, r, "token generation failed", err)
 		return
 	}
 
 	n, err := a.Store.CreateNode(r.Context(), req.Name, a.Hasher.Hash(token), req.MaxKeys)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create node failed")
+		writeInternalError(w, r, "create node failed", err)
 		return
 	}
 
@@ -51,7 +51,7 @@ func (a *App) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := a.Store.ListNodes(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list nodes failed")
+		writeInternalError(w, r, "list nodes failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nodes)
@@ -62,7 +62,7 @@ func (a *App) handleRotateNodeToken(w http.ResponseWriter, r *http.Request) {
 
 	token, err := auth.GenerateToken("node")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token generation failed")
+		writeInternalError(w, r, "token generation failed", err)
 		return
 	}
 
@@ -70,7 +70,7 @@ func (a *App) handleRotateNodeToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "rotate failed")
+		writeInternalError(w, r, "rotate failed", err)
 		return
 	}
 
@@ -94,13 +94,13 @@ func (a *App) handleCreateIngestToken(w http.ResponseWriter, r *http.Request) {
 
 	token, err := auth.GenerateToken("ingest")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token generation failed")
+		writeInternalError(w, r, "token generation failed", err)
 		return
 	}
 
 	it, err := a.Store.CreateIngestToken(r.Context(), a.Hasher.Hash(token), req.Label, req.Scope)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create ingest token failed")
+		writeInternalError(w, r, "create ingest token failed", err)
 		return
 	}
 
@@ -112,7 +112,7 @@ func (a *App) handleCreateIngestToken(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListIngestTokens(w http.ResponseWriter, r *http.Request) {
 	tokens, err := a.Store.ListIngestTokens(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list ingest tokens failed")
+		writeInternalError(w, r, "list ingest tokens failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tokens)
@@ -124,7 +124,7 @@ func (a *App) handleSetIngestTokenEnabled(enabled bool) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "ingest token not found")
 			return
 		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "update ingest token failed")
+			writeInternalError(w, r, "update ingest token failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
@@ -134,7 +134,7 @@ func (a *App) handleSetIngestTokenEnabled(enabled bool) http.HandlerFunc {
 func (a *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := a.Store.ListKeys(r.Context(), store.ListKeysFilter{OwnerRef: r.URL.Query().Get("owner_ref")})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list keys failed")
+		writeInternalError(w, r, "list keys failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, keys)
@@ -151,7 +151,7 @@ func (a *App) handleGetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "get key failed")
+		writeInternalError(w, r, "get key failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, k)
@@ -172,7 +172,7 @@ func (a *App) handlePatchKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "key not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "update key failed")
+		writeInternalError(w, r, "update key failed", err)
 		return
 	}
 
@@ -184,7 +184,7 @@ func (a *App) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "key not found")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "delete key failed")
+		writeInternalError(w, r, "delete key failed", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -196,7 +196,7 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "key not found")
 			return
 		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "update key failed")
+			writeInternalError(w, r, "update key failed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})

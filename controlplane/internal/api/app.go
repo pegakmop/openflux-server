@@ -93,6 +93,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// writeInternalError responds 500 with message (client-facing, never err's
+// raw text - that could leak internals) while logging the actual err
+// server-side. Without this, a 500 was a dead end for whoever's operating
+// the server: "create key failed" alone gives no way to tell a Postgres
+// outage from a bad query from anything else - it's already happened once.
+func writeInternalError(w http.ResponseWriter, r *http.Request, message string, err error) {
+	log.Printf("%s %s: %s: %v", r.Method, r.URL.Path, message, err)
+	writeError(w, http.StatusInternalServerError, message)
+}
+
 func readJSON(r *http.Request, dst interface{}) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

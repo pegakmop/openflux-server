@@ -33,7 +33,7 @@ func (a *App) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "lookup failed")
+		writeInternalError(w, r, "lookup failed", err)
 		return
 	}
 

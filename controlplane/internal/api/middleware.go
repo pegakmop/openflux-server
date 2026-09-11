@@ -57,7 +57,7 @@ func (a *App) withIngestToken(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "lookup failed")
+			writeInternalError(w, r, "lookup failed", err)
 			return
 		}
 
@@ -80,7 +80,7 @@ func (a *App) withNodeToken(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "lookup failed")
+			writeInternalError(w, r, "lookup failed", err)
 			return
 		}
 
