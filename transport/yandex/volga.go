@@ -164,6 +164,7 @@ func authorize(docURL string) (*volgaAuth, error) {
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
+			DialContext:         transport.ProtectedDialer().DialContext,
 		},
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -443,6 +444,7 @@ func newRelayClient(auth *volgaAuth, cfg VolgaConfig, stats *VolgaStats) *relayC
 		IdleConnTimeout:     cfg.IdleConnTimeout,
 		DisableCompression:  true,
 		ForceAttemptHTTP2:   true,
+		DialContext:         transport.ProtectedDialer().DialContext,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -781,6 +783,7 @@ func (w *wsListener) connect(attempt int) error {
 		HandshakeTimeout: w.config.WSHandshakeTimeout,
 		ReadBufferSize:   4 << 20,
 		WriteBufferSize:  4 << 20,
+		NetDialContext:   transport.ProtectedDialer().DialContext,
 	}
 
 	conn, _, err := dialer.Dial(wsURL, header)

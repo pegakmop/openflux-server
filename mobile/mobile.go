@@ -10,6 +10,7 @@ package mobile
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -20,6 +21,11 @@ import (
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/tunnel"
 )
+
+// originalResolver is whatever net.DefaultResolver was before StartTunnel
+// first overrides it (see Protector below) - captured once at package load,
+// before anything has a chance to change it, so StopTunnel can put it back.
+var originalResolver = net.DefaultResolver
 
 // The "oneme" (MAX) transport pulls in github.com/pion/transport/v2/stdnet
 // -> github.com/wlynxg/anet, which uses a //go:linkname hook into net's
@@ -43,6 +49,19 @@ type Callback interface {
 	// code/detail are transport.Event* constants and their documented
 	// detail shapes (see transport/transport.go).
 	OnLogEvent(code string, detail string)
+}
+
+// Protector exempts a raw socket fd from the Android VPN's own tunnel
+// interface (Kotlin implements this as a thin call to
+// android.net.VpnService.protect(fd)). Without it, every connection the
+// transport itself makes - to the doc, to DNS, ... - gets captured by the
+// very tunnel it's supposed to be carrying, which deadlocks the whole
+// thing (see transport.ProtectedDialer's doc comment for the full story).
+// May be nil - StartTunnel then runs unprotected, which is correct for
+// callers that aren't behind an Android VpnService (there's nothing to be
+// captured by).
+type Protector interface {
+	Protect(fd int) bool
 }
 
 // Config is the JSON contract for StartTunnel, mirroring one Android
@@ -85,8 +104,8 @@ var (
 // descriptor already established by the caller's VpnService - and relays
 // its traffic through the transport described by configJSON. Only one
 // tunnel runs at a time; call StopTunnel before starting another (e.g. to
-// switch profiles).
-func StartTunnel(tunFd int, configJSON string, cb Callback) error {
+// switch profiles). protector may be nil (see Protector's doc comment).
+func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback) error {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -97,6 +116,11 @@ func StartTunnel(tunFd int, configJSON string, cb Callback) error {
 	var cfg Config
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		return fail(cb, fmt.Errorf("parse config: %w", err))
+	}
+
+	if protector != nil {
+		transport.SetProtector(protector.Protect)
+		net.DefaultResolver = transport.ProtectedResolver()
 	}
 
 	notify(cb, "connecting")
@@ -150,6 +174,9 @@ func StopTunnel() error {
 	s := current
 	current = nil
 	mu.Unlock()
+
+	transport.SetProtector(nil)
+	net.DefaultResolver = originalResolver
 
 	if s == nil {
 		return nil

@@ -28,7 +28,7 @@ func (c *MaxClient) Connect() error {
 	header := http.Header{}
 	header.Set("Origin", "https://web.max.ru")
 	header.Set("User-Agent", USER_AGENT)
-	conn, _, err := websocket.DefaultDialer.Dial(WS_HOST, header)
+	conn, _, err := protectedWSDialer().Dial(WS_HOST, header)
 	if err != nil {
 		return err
 	}

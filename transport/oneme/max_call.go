@@ -434,7 +434,7 @@ func startOutgoingCall(client *MaxClient, calleeID int64) *CallHandler {
 			json.Unmarshal([]byte(paramsStr), &params)
 
 			endpoint := params.Endpoint + "&platform=WEB&appVersion=1.1&version=5&device=browser&capabilities=2A03F&clientType=ONE_ME&tgt=start"
-			conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
+			conn, _, err := protectedWSDialer().Dial(endpoint, nil)
 			if err != nil {
 				logError("[CALLER] Dial error: %v, retrying...", err)
 				time.Sleep(1 * time.Second)
@@ -522,7 +522,7 @@ func startIncomingListener(client *MaxClient) *CallHandler {
 			endpoint := craftEndpoint(convID, callDetails)
 			logInfo("[RECEIVER] Initial endpoint: %s", endpoint)
 
-			conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
+			conn, _, err := protectedWSDialer().Dial(endpoint, nil)
 			if err != nil {
 				logError("[RECEIVER] Connect error: %v", err)
 				return
