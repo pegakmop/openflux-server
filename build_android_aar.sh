@@ -32,6 +32,11 @@ fi
 go get -tool golang.org/x/mobile/cmd/gobind
 
 echo "Building $OUTPUT_AAR (androidapi 26, arm64/arm/x86_64)..."
-gomobile bind -target=android -androidapi 26 -o "$OUTPUT_AAR" ./mobile
+# -checklinkname=0: the MAX transport (transport/oneme) pulls in
+# github.com/wlynxg/anet, which uses //go:linkname to reach into net's
+# internals - restricted by Go's linker since 1.23 unless told otherwise
+# (see anet's own README). Without this flag the link step fails with
+# "invalid reference to net.zoneCache".
+gomobile bind -target=android -androidapi 26 -ldflags="-checklinkname=0" -o "$OUTPUT_AAR" ./mobile
 
 echo "Build successful: $OUTPUT_AAR"

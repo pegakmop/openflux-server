@@ -16,17 +16,18 @@ import (
 
 	"universal-bypass-tool/gateway"
 	"universal-bypass-tool/transport"
+	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/tunnel"
 )
 
-// The "oneme" (MAX) transport is intentionally not available here: it pulls
-// in github.com/pion/transport/v2/stdnet -> github.com/wlynxg/anet, whose
-// go:linkname hook into net's internals doesn't build against every Go
-// toolchain (it does not against the one this module currently pins), and
-// there is no newer anet release to fix it. The managed/key-based flow from
-// controlplane is Yandex-only anyway (see nodeagent), so the mobile client
-// only needs manual-yandex and key mode.
+// The "oneme" (MAX) transport pulls in github.com/pion/transport/v2/stdnet
+// -> github.com/wlynxg/anet, which uses a //go:linkname hook into net's
+// internals that Go 1.23+'s linker rejects by default ("invalid reference
+// to net.zoneCache"). It's not actually unfixable - anet's own README
+// documents the fix - it just needs `-ldflags=-checklinkname=0` passed to
+// `gomobile bind` (see build_android_aar.sh), which isn't something the Go
+// toolchain can be told to do from within this source file.
 
 // Callback receives lifecycle and traffic updates from a running tunnel.
 // Implemented on the Kotlin side; gomobile exposes it there as a Java
@@ -54,8 +55,10 @@ type Config struct {
 	KeyToken   string `json:"key_token"`
 
 	// mode == "manual"
-	Transport string `json:"transport"` // "yandex" (only option today)
+	Transport string `json:"transport"` // "yandex" (default) or "max"
 	DocURL    string `json:"doc_url"`   // manual + yandex
+	MaxToken  string `json:"max_token"` // manual + max: your MAX account's own auth token
+	MaxUID    int64  `json:"max_uid"`   // manual + max: the contact's user ID to place the call to
 
 	// Applies to both modes. MTU is informational here - the caller applies
 	// it to the Android VpnService.Builder itself before opening the TUN fd.
@@ -96,13 +99,13 @@ func StartTunnel(tunFd int, configJSON string, cb Callback) error {
 
 	notify(cb, "connecting")
 
-	docURL, err := resolveConfig(cfg)
+	transportConfig := transport.DefaultConfig()
+	inner, err := buildTransport(cfg, transportConfig)
 	if err != nil {
 		return fail(cb, err)
 	}
 
-	transportConfig := transport.DefaultConfig()
-	trans := transport.NewCompressedTransport(yandex.NewYandexDocsTransport(docURL, transportConfig))
+	trans := transport.NewCompressedTransport(inner)
 	trans.SetEventCallback(func(code, detail string) {
 		if cb != nil {
 			cb.OnLogEvent(code, detail)
@@ -158,42 +161,52 @@ func StopTunnel() error {
 	return nil
 }
 
-// resolveConfig returns the Yandex Docs URL to tunnel through. Only that one
-// transport is supported here (see the package-level comment on why "oneme"
-// is excluded), so there is nothing else for a caller to switch on.
-func resolveConfig(cfg Config) (docURL string, err error) {
+// buildTransport picks and constructs the concrete transport for cfg,
+// without starting it - StartTunnel wraps the result (compression, event
+// callback) before calling Start. controlplane-managed keys ("key" mode)
+// are Yandex-only today (see nodeagent); "max" is only reachable via
+// "manual" mode, where the user supplies their own MAX credentials
+// directly instead of getting them handed out by a controlplane key.
+func buildTransport(cfg Config, transportConfig transport.TransportConfig) (transport.Transport, error) {
 	switch cfg.Mode {
 	case "key":
 		if cfg.ControlURL == "" || cfg.KeyToken == "" {
-			return "", fmt.Errorf(`mode "key" requires control_url and key_token`)
+			return nil, fmt.Errorf(`mode "key" requires control_url and key_token`)
 		}
 		_, parsed, rerr := resolveRaw(cfg.ControlURL, cfg.KeyToken)
 		if rerr != nil {
-			return "", rerr
+			return nil, rerr
 		}
 		if parsed.Status != "active" {
-			return "", fmt.Errorf("key is %s", parsed.Status)
+			return nil, fmt.Errorf("key is %s", parsed.Status)
 		}
 		if parsed.Transport != "" && parsed.Transport != "yandex" {
-			return "", fmt.Errorf("unsupported transport %q for this client", parsed.Transport)
+			return nil, fmt.Errorf("unsupported transport %q for this client", parsed.Transport)
 		}
-		return parsed.DocURL, nil
+		return yandex.NewYandexDocsTransport(parsed.DocURL, transportConfig), nil
 
 	case "manual":
 		t := cfg.Transport
 		if t == "" {
 			t = "yandex"
 		}
-		if t != "yandex" {
-			return "", fmt.Errorf("unsupported transport %q for this client", t)
+		switch t {
+		case "yandex":
+			if cfg.DocURL == "" {
+				return nil, fmt.Errorf("manual mode requires doc_url")
+			}
+			return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), nil
+		case "max":
+			if cfg.MaxToken == "" || cfg.MaxUID == 0 {
+				return nil, fmt.Errorf("the max transport requires max_token and max_uid")
+			}
+			return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), nil
+		default:
+			return nil, fmt.Errorf("unsupported transport %q for this client", t)
 		}
-		if cfg.DocURL == "" {
-			return "", fmt.Errorf("manual mode requires doc_url")
-		}
-		return cfg.DocURL, nil
 
 	default:
-		return "", fmt.Errorf(`config.mode must be "key" or "manual", got %q`, cfg.Mode)
+		return nil, fmt.Errorf(`config.mode must be "key" or "manual", got %q`, cfg.Mode)
 	}
 }
 
