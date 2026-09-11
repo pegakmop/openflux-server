@@ -12,6 +12,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
@@ -39,17 +40,17 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 	utils.Debugf("[TUNNEL] Net stack init...")
 	t.gvisorStack = stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 
-        if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
-            &tcpip.TCPReceiveBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
-            utils.Debugf("[TUNNEL] Failed to set recv buffer: %v", err)
-        }
-        if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
-            &tcpip.TCPSendBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
-            utils.Debugf("[TUNNEL] Failed to set send buffer: %v", err)
-        }
+	if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
+		&tcpip.TCPReceiveBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
+		utils.Debugf("[TUNNEL] Failed to set recv buffer: %v", err)
+	}
+	if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
+		&tcpip.TCPSendBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
+		utils.Debugf("[TUNNEL] Failed to set send buffer: %v", err)
+	}
 
 	tunnelEP := NewTunnelLinkEndpoint()
 	tunnelEP.SetOutgoingPacketHandler(func(data []byte) {
@@ -163,6 +164,37 @@ func (t *TCPTunnel) DialTCP(address string) (net.Conn, error) {
 	}, ipv4.ProtocolNumber)
 
 	return conn, err
+}
+
+// DialUDP mirrors DialTCP but for UDP: it creates a "connected" gvisor UDP
+// endpoint bound to the tunnel (or, on an exit node, internet-facing) NIC,
+// whose datagrams travel the exact same path as TCP segments do - real
+// UDP/IP packets emitted by gvisor, shipped over the covert channel, and
+// (on the exit node) IP-forwarded out to the real destination exactly like
+// any other forwarded packet, since setupExitNode's forwarding is plain L3
+// and never inspects the transport protocol.
+func (t *TCPTunnel) DialUDP(address string) (net.Conn, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return nil, fmt.Errorf("resolve: %w", err)
+	}
+
+	ip := udpAddr.IP.To4()
+	if ip == nil {
+		return nil, fmt.Errorf("IPv6 not supported")
+	}
+
+	nic := tcpip.NICID(1)
+	if t.isExitNode {
+		nic = tcpip.NICID(2)
+	}
+
+	remote := tcpip.FullAddress{
+		NIC:  nic,
+		Addr: tcpip.AddrFrom4([4]byte{ip[0], ip[1], ip[2], ip[3]}),
+		Port: uint16(udpAddr.Port),
+	}
+	return gonet.DialUDP(t.gvisorStack, nil, &remote, ipv4.ProtocolNumber)
 }
 
 func (t *TCPTunnel) ListenTCP(port uint16) (net.Listener, error) {
