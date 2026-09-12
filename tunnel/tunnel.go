@@ -141,6 +141,26 @@ func (t *TCPTunnel) setupClient(tunnelNIC tcpip.NICID) {
 	})
 }
 
+// SetPortRange restricts the ephemeral ports this tunnel's gvisor stack
+// picks for outbound connections to [start, end]. An exit node running one
+// TCPTunnel per key all share the same real IP and a raw socket that
+// receives every TCP packet addressed to the host - each stack's ephemeral
+// port allocator has no idea any of the others exist, so with the default
+// (whole) range, two keys' stacks can independently pick the same source
+// port for two different real destinations at the same time. Both raw
+// sockets see every reply on that port either way, and both keys'
+// activePorts tables would independently claim it, delivering one key's
+// real traffic into the other's tunnel. Giving every worker a disjoint
+// range (see nodeagent's portAllocator) makes that impossible by
+// construction instead of merely unlikely. Call before any real traffic
+// flows - changing it mid-flight would strand in-progress connections whose
+// ports fall outside the new range.
+func (t *TCPTunnel) SetPortRange(start, end uint16) {
+	if err := t.gvisorStack.SetPortRange(start, end); err != nil {
+		utils.Debugf("[TUNNEL] SetPortRange(%d-%d) failed: %v", start, end, err)
+	}
+}
+
 func (t *TCPTunnel) DialTCP(address string) (net.Conn, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {

@@ -5,6 +5,7 @@ package nodeagent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -33,9 +34,10 @@ func DefaultConfig(controlURL, nodeToken string) Config {
 }
 
 type worker struct {
-	trans  transport.Transport
-	tun    *tunnel.TCPTunnel
-	docURL string
+	trans   transport.Transport
+	tun     *tunnel.TCPTunnel
+	docURL  string
+	portIdx int
 
 	// lastSent/lastRecv are the transport's cumulative byte counters as of
 	// the last usage report, so ReportUsage only sends the delta.
@@ -51,6 +53,7 @@ type Orchestrator struct {
 
 	mu      sync.Mutex
 	workers map[string]*worker
+	ports   portAllocator
 }
 
 func NewOrchestrator(cfg Config) *Orchestrator {
@@ -59,6 +62,66 @@ func NewOrchestrator(cfg Config) *Orchestrator {
 		cfg:     cfg,
 		workers: make(map[string]*worker),
 	}
+}
+
+// portRangeBase/portRangeSize/portRangeMax divide the usable TCP port space
+// into fixed-size, non-overlapping blocks - see TCPTunnel.SetPortRange's
+// doc comment for why every worker on this node needs one of its own.
+// portRangeSize=256 leaves room for a generous number of concurrent
+// connections per key while still fitting roughly 250 concurrent workers
+// in the space below portRangeMax.
+const (
+	portRangeBase = 1025
+	portRangeSize = 256
+	portRangeMax  = 65535
+)
+
+// portAllocator hands out disjoint [start, end] port ranges by index,
+// recycling an index once its worker stops. Zero value is ready to use.
+type portAllocator struct {
+	mu   sync.Mutex
+	next int
+	free []int
+}
+
+// alloc reserves the next free range, returning ok=false once the port
+// space is exhausted (roughly (portRangeMax-portRangeBase)/portRangeSize
+// concurrent workers) - the caller should treat that as "no capacity left
+// on this node right now" rather than a fatal error.
+func (p *portAllocator) alloc() (idx int, start, end uint16, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	fromFree := false
+	if n := len(p.free); n > 0 {
+		idx = p.free[n-1]
+		p.free = p.free[:n-1]
+		fromFree = true
+	} else {
+		idx = p.next
+		p.next++
+	}
+
+	rangeStart := portRangeBase + idx*portRangeSize
+	rangeEnd := rangeStart + portRangeSize - 1
+	if rangeEnd > portRangeMax {
+		// Undo the reservation - this index isn't usable - without
+		// disturbing whichever source (free list or the running counter)
+		// it actually came from.
+		if fromFree {
+			p.free = append(p.free, idx)
+		} else {
+			p.next--
+		}
+		return 0, 0, 0, false
+	}
+	return idx, uint16(rangeStart), uint16(rangeEnd), true
+}
+
+func (p *portAllocator) release(idx int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.free = append(p.free, idx)
 }
 
 // Run blocks until ctx is cancelled, driving the poll/usage/heartbeat loops
@@ -76,7 +139,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for id, w := range o.workers {
-		stopWorker(w)
+		o.stopWorker(w)
 		delete(o.workers, id)
 	}
 }
@@ -114,7 +177,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	for id, w := range o.workers {
 		if _, stillActive := active[id]; !stillActive {
 			utils.Debugf("[NODEAGENT] stopping worker for key %s (no longer active)", id)
-			stopWorker(w)
+			o.stopWorker(w)
 			delete(o.workers, id)
 		}
 	}
@@ -128,7 +191,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 			continue
 		}
 
-		w, err := startWorker(k)
+		w, err := o.startWorker(k)
 		if err != nil {
 			utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", id, err)
 			continue
@@ -138,18 +201,31 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	}
 }
 
-func startWorker(k RemoteKey) (*worker, error) {
+func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
+	portIdx, portStart, portEnd, ok := o.ports.alloc()
+	if !ok {
+		return nil, fmt.Errorf("no port range capacity left on this node")
+	}
+
 	trans := transport.NewCompressedTransport(yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig()))
 	if err := trans.Start(); err != nil {
+		o.ports.release(portIdx)
 		return nil, err
 	}
 	tun := tunnel.NewTCPTunnel(trans, true)
-	return &worker{trans: trans, tun: tun, docURL: k.DocURL}, nil
+	// See TCPTunnel.SetPortRange's doc comment: every worker on this node
+	// shares one real IP and one raw socket's view of all inbound TCP
+	// traffic, so without a disjoint range per worker, two keys' stacks
+	// could independently pick the same source port at the same time and
+	// cross-deliver each other's traffic.
+	tun.SetPortRange(portStart, portEnd)
+	return &worker{trans: trans, tun: tun, docURL: k.DocURL, portIdx: portIdx}, nil
 }
 
-func stopWorker(w *worker) {
+func (o *Orchestrator) stopWorker(w *worker) {
 	w.trans.Stop()
 	w.tun.Close()
+	o.ports.release(w.portIdx)
 }
 
 func (o *Orchestrator) usageLoop(ctx context.Context) {
@@ -205,7 +281,7 @@ func (o *Orchestrator) reportUsage(ctx context.Context) {
 	for _, id := range disabledNow {
 		if w, ok := o.workers[id]; ok {
 			utils.Debugf("[NODEAGENT] key %s went over quota, stopping worker", id)
-			stopWorker(w)
+			o.stopWorker(w)
 			delete(o.workers, id)
 		}
 	}
