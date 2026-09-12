@@ -308,7 +308,13 @@ func buildRemoteCommand(opts DeployOptions) string {
 
 	var b strings.Builder
 	b.WriteString("set -e; ")
-	fmt.Fprintf(&b, "curl -fsSL %s -o /tmp/openflux-install.sh; ", shellQuote(scriptURL))
+	// raw.githubusercontent.com sits behind a CDN that caches a given URL
+	// for a few minutes - a deploy retried right after a fix lands on the
+	// default branch can otherwise still fetch the pre-fix script, making a
+	// just-shipped fix look like it didn't take. A unique query string per
+	// invocation is a different URL as far as the cache is concerned, so
+	// every run always gets the current content.
+	fmt.Fprintf(&b, "curl -fsSL %s -o /tmp/openflux-install.sh; ", shellQuote(cacheBust(scriptURL)))
 	for _, key := range []string{
 		"REPO_URL", "GIT_REF", "TLS_MODE", "DOMAIN", "LE_EMAIL", "SERVER_IP",
 		"ADMIN_TOKEN", "DB_PASSWORD", "REGISTER_NODE", "NODE_NAME", "NODE_MAX_KEYS", "RUN_NODE_HERE",
@@ -322,6 +328,16 @@ func buildRemoteCommand(opts DeployOptions) string {
 	b.WriteString("bash /tmp/openflux-install.sh")
 
 	return b.String()
+}
+
+// cacheBust appends a timestamp query parameter so repeated deploys never
+// reuse a CDN's cached response for scriptURL - see buildRemoteCommand.
+func cacheBust(scriptURL string) string {
+	sep := "?"
+	if strings.Contains(scriptURL, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%s_=%d", scriptURL, sep, time.Now().UnixNano())
 }
 
 func boolToYN(b bool) string {

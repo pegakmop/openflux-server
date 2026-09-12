@@ -47,8 +47,8 @@ func TestBuildRemoteCommandIncludesDefaultsAndQuoting(t *testing.T) {
 		RegisterNode: false,
 	})
 
-	if !strings.Contains(cmd, "curl -fsSL '"+defaultDeployScriptURL+"'") {
-		t.Errorf("command should curl the default script URL when none is set: %s", cmd)
+	if !strings.Contains(cmd, "curl -fsSL '"+defaultDeployScriptURL+"?_=") {
+		t.Errorf("command should curl the default script URL (cache-busted) when none is set: %s", cmd)
 	}
 	if !strings.Contains(cmd, `export ADMIN_TOKEN='adm'\''in';`) {
 		t.Errorf("ADMIN_TOKEN should be shell-quoted with the embedded quote escaped: %s", cmd)
@@ -69,8 +69,17 @@ func TestBuildRemoteCommandIncludesDefaultsAndQuoting(t *testing.T) {
 
 func TestBuildRemoteCommandCustomScriptURL(t *testing.T) {
 	cmd := buildRemoteCommand(DeployOptions{DeployScriptURL: "https://example.com/my-install.sh"})
-	if !strings.Contains(cmd, "curl -fsSL 'https://example.com/my-install.sh'") {
-		t.Errorf("a custom DeployScriptURL should be used verbatim: %s", cmd)
+	if !strings.Contains(cmd, "curl -fsSL 'https://example.com/my-install.sh?_=") {
+		t.Errorf("a custom DeployScriptURL should be used, cache-busted the same way as the default: %s", cmd)
+	}
+}
+
+func TestCacheBustAppendsQueryParamCorrectly(t *testing.T) {
+	if got := cacheBust("https://example.com/install.sh"); !strings.HasPrefix(got, "https://example.com/install.sh?_=") {
+		t.Errorf("cacheBust(no existing query) = %q, want a ?_= param appended", got)
+	}
+	if got := cacheBust("https://example.com/install.sh?ref=main"); !strings.HasPrefix(got, "https://example.com/install.sh?ref=main&_=") {
+		t.Errorf("cacheBust(existing query) = %q, want an &_= param appended", got)
 	}
 }
 
