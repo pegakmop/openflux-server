@@ -254,6 +254,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			return
 		}
 		t.EmitEvent(transport.EventConnected, strconv.Itoa(attempt+1))
+		connectedAt := time.Now()
 
 		for t.IsRunning() {
 			conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -261,7 +262,21 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			if err != nil {
 				utils.Debugf("[YDOCS] Read error: %v", err)
 				t.SetConnected(false)
-				t.scheduleReconnect(attempt, reasonReadError, err)
+				// A session that stayed up for a while dropping is a normal,
+				// unremarkable blip (Yandex's own infra recycling the
+				// connection, a brief network hiccup) - not evidence the
+				// backend or network is struggling and reconnects should
+				// slow down for. Without this, attempt only ever grows
+				// across a long-lived transport's whole life, so backoff
+				// eventually settles at MaxReconnectDelay and stays there
+				// for every future reconnect, even hours later when nothing
+				// is actually wrong - a working connection ends up waiting
+				// up to 30s to come back after every routine drop.
+				next := attempt
+				if time.Since(connectedAt) > 15*time.Second {
+					next = 0
+				}
+				t.scheduleReconnect(next, reasonReadError, err)
 				return
 			}
 			t.handleMessage(session, message)
