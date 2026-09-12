@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	connectTimeout = 15 * time.Second
-	deployTimeout  = 15 * time.Minute
+	connectTimeout     = 15 * time.Second
+	deployTimeout      = 15 * time.Minute
+	tcpKeepAlivePeriod = 15 * time.Second
 
 	defaultDeployScriptURL = "https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/install.sh"
 )
@@ -133,10 +134,24 @@ func Deploy(target SSHTarget, opts DeployOptions, cb Callback) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", target.Host, target.Port)
-	client, err := ssh.Dial("tcp", addr, config)
+	// ssh.Dial's own net.Dial leaves OS-level TCP keepalive off. The
+	// keepalive@openflux goroutine below only puts traffic on a connection
+	// that's still actually there - it does nothing for one the kernel
+	// thinks is fine but that's gone dead on the wire (a mobile network
+	// swapping towers, a NAT that dropped the mapping without either side's
+	// TCP stack noticing yet). A nonzero net.Dialer.KeepAlive turns on the
+	// OS's own probing, which detects that case and fails the connection
+	// outright instead of leaving it silently hung.
+	tcpConn, err := (&net.Dialer{Timeout: connectTimeout, KeepAlive: tcpKeepAlivePeriod}).Dial("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("ssh dial %s: %w", addr, err)
+		return fmt.Errorf("dial %s: %w", addr, err)
 	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, config)
+	if err != nil {
+		tcpConn.Close()
+		return fmt.Errorf("ssh handshake %s: %w", addr, err)
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 
 	cb.OnHostKeyFingerprint(reportedFingerprint)
