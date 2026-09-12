@@ -9,6 +9,10 @@ type Node struct {
 	Status          string
 	LastHeartbeatAt *time.Time
 	CreatedAt       time.Time
+	// ActiveKeys is the number of enabled keys currently assigned to this
+	// node. It's computed on read (ListNodes) rather than stored, so it can
+	// never drift from the actual assignment state.
+	ActiveKeys int
 }
 
 type Key struct {
@@ -59,4 +63,11 @@ type UsageDelta struct {
 	KeyID              string
 	BytesSentDelta     int64
 	BytesReceivedDelta int64
+}
+
+type UsageDay struct {
+	Day            string // "2006-01-02"
+	BytesSent      int64
+	BytesReceived  int64
+	ActiveKeyCount int // distinct keys that used traffic that day
 }

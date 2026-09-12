@@ -68,3 +68,75 @@ func (s *Store) ApplyUsageDeltas(ctx context.Context, deltas []model.UsageDelta)
 
 	return disabledNow, nil
 }
+
+// AggregateUsageDays returns per-day traffic totals across every key for the
+// last days days (the current day included). Empty days are simply absent
+// from the result - the caller can decide how to render gaps.
+func (s *Store) AggregateUsageDays(ctx context.Context, days int) ([]model.UsageDay, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if days > 365 {
+		days = 365
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT day, sum(bytes_sent)::bigint, sum(bytes_received)::bigint, count(DISTINCT key_id)::int
+		FROM usage_daily
+		WHERE day >= CURRENT_DATE - ($1::int - 1)
+		GROUP BY day
+		ORDER BY day ASC
+	`, days)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate usage days: %w", err)
+	}
+	defer rows.Close()
+
+	return scanUsageDays(rows)
+}
+
+// KeyUsageDays returns the per-day traffic totals for a single key over the
+// last days days. Deleting a key cascades its usage_daily rows away, so a
+// deleted key simply returns an empty list.
+func (s *Store) KeyUsageDays(ctx context.Context, keyID string, days int) ([]model.UsageDay, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if days > 365 {
+		days = 365
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT day, bytes_sent, bytes_received, 1::int AS active_keys
+		FROM usage_daily
+		WHERE key_id = $1 AND day >= CURRENT_DATE - ($2::int - 1)
+		ORDER BY day ASC
+	`, keyID, days)
+	if err != nil {
+		return nil, fmt.Errorf("key usage days: %w", err)
+	}
+	defer rows.Close()
+
+	return scanUsageDays(rows)
+}
+
+type usageRowScanner interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+func scanUsageDays(rows usageRowScanner) ([]model.UsageDay, error) {
+	var out []model.UsageDay
+	for rows.Next() {
+		var u model.UsageDay
+		if err := rows.Scan(&u.Day, &u.BytesSent, &u.BytesReceived, &u.ActiveKeyCount); err != nil {
+			return nil, fmt.Errorf("scan usage day: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage days: %w", err)
+	}
+	return out, nil
+}
