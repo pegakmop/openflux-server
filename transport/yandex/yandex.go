@@ -101,11 +101,17 @@ func (t *YandexDocsTransport) Start() error {
 	return nil
 }
 
+// Send queues data for the writer loop to actually put on the wire.
+// Deliberately does not require IsConnected(): a session's WriteQueue is
+// reused across a reconnect (see connectToDoc) precisely so a brief drop
+// doesn't have to lose data, but an early return here for "not connected
+// right now" was throwing every packet away for the entire reconnect
+// window regardless - the queue existed but nothing during a drop ever
+// reached it. A connection blip that would otherwise have been invisible
+// (queued, then drained once the new session comes up) was instead forcing
+// the real end-to-end TCP connection several hops away to notice the loss
+// and retransmit on its own, much slower, timeout.
 func (t *YandexDocsTransport) Send(data []byte) error {
-	if !t.IsConnected() {
-		return fmt.Errorf("transport not connected")
-	}
-
 	t.Mu.RLock()
 	session := t.session
 	t.Mu.RUnlock()

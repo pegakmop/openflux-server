@@ -14,6 +14,44 @@ import (
 	"universal-bypass-tool/transport"
 )
 
+// --- Send ---------------------------------------------------------------
+
+// TestSendQueuesEvenWhileDisconnected guards a real bug: Send used to
+// reject with "transport not connected" for the entire window between a
+// drop and the next successful reconnect, even though the session's
+// WriteQueue survives a reconnect specifically so queued data doesn't have
+// to be lost (see connectToDoc's existingSession handling and Send's own
+// doc comment). A disconnected transport with no session at all must still
+// fail - only "has a session, but IsConnected() is momentarily false"
+// should succeed.
+func TestSendQueuesEvenWhileDisconnected(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	tr.session = &DocSession{WriteQueue: make(chan []byte, 4)}
+	// Deliberately not calling tr.SetConnected(true) - this is the state
+	// during a reconnect: a (possibly stale) session exists, but the
+	// transport doesn't consider itself connected right now.
+
+	if err := tr.Send([]byte("hello")); err != nil {
+		t.Fatalf("Send while disconnected but with a session = %v, want nil", err)
+	}
+
+	select {
+	case got := <-tr.session.WriteQueue:
+		if string(got) != "hello" {
+			t.Errorf("queued %q, want %q", got, "hello")
+		}
+	default:
+		t.Fatalf("Send returned nil but nothing was queued")
+	}
+}
+
+func TestSendFailsWithNoSessionAtAll(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	if err := tr.Send([]byte("hello")); err == nil {
+		t.Fatalf("expected an error before any session has ever been established")
+	}
+}
+
 // --- backoffDelay -----------------------------------------------------
 
 func TestBackoffDelayGrowsAndCaps(t *testing.T) {
