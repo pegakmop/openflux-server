@@ -635,6 +635,8 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	htmlBytes, _ := io.ReadAll(resp.Body)
 	html := string(htmlBytes)
 
+	utils.Debugf("[YDOCS] fetchDocInfo GET %s -> %d (%d bytes)", url, resp.StatusCode, len(html))
+
 	var cookies []string
 	for _, c := range resp.Cookies() {
 		cookies = append(cookies, fmt.Sprintf("%s=%s", c.Name, c.Value))
@@ -643,6 +645,21 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	re := regexp.MustCompile(`<script[^>]*id="client-config"[^>]*>(.*?)</script>`)
 	matches := re.FindStringSubmatch(html)
 	if len(matches) < 2 {
+		// Without this, "config not found" was a dead end - no way to tell
+		// a CAPTCHA page apart from a login redirect, a maintenance page,
+		// or something else entirely without reproducing it by hand.
+		// SmartCaptcha/showcaptcha/checkbox-captcha are the markers Yandex's
+		// own bot-check pages actually use, so this is flagged explicitly
+		// rather than left for someone reading the preview to notice.
+		lower := strings.ToLower(html)
+		if strings.Contains(lower, "captcha") {
+			utils.Debugf("[YDOCS] response looks like a CAPTCHA/bot-check page, not the doc editor")
+		}
+		preview := html
+		if len(preview) > 2000 {
+			preview = preview[:2000]
+		}
+		utils.Debugf("[YDOCS] HTML preview: %s", preview)
 		return YandexDocsInfo{}, fmt.Errorf("config not found")
 	}
 
