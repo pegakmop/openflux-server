@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 
@@ -64,6 +65,20 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 	if dispatcher == nil {
 		return
 	}
+
+	// gvisor panics on some inputs it doesn't expect instead of returning an
+	// error - seen in production as "panic: unexpected transport protocol =
+	// 0" from its NAT/conntrack code (SetForwardingDefaultAndAllNICs, used
+	// by the exit node) on a packet it apparently didn't like. This call
+	// runs on a shared per-transport goroutine (the covert channel's own
+	// read loop), so an unrecovered panic here doesn't just drop this one
+	// packet - it takes the whole process down, disconnecting every client
+	// this exit node was serving. One bad packet dropped beats that.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[TUNNEL] recovered from a panic dispatching an inbound packet (%d bytes): %v", len(data), r)
+		}
+	}()
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(append([]byte{}, data...)),
