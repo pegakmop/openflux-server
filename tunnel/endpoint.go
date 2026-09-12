@@ -76,7 +76,13 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 	// this exit node was serving. One bad packet dropped beats that.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[TUNNEL] recovered from a panic dispatching an inbound packet (%d bytes): %v", len(data), r)
+			// Always logged (not gated behind utils.IsVerbose() like the
+			// line above) - this is already the rare, exceptional case
+			// worth paying attention to, and the whole point is capturing
+			// what kind of packet triggers it without needing --debug
+			// already running when it happens again.
+			log.Printf("[TUNNEL] recovered from a panic dispatching an inbound packet (%d bytes, %s): %v",
+				len(data), network.ParsePacketInfo(data), r)
 		}
 	}()
 
