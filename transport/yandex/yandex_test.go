@@ -297,7 +297,9 @@ func TestFetchDocInfoValidConfig(t *testing.T) {
 	body := `<script id="client-config">{"officeActionData":{"balancer_url":"https://balancer.example",` +
 		`"editor_config":{"token":"tok123","document":{"key":"doc-key-1","fileType":"docx","url":"https://x/doc","title":"T"}}}}</script>`
 
+	var gotHeaders http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
 		w.Write([]byte(body))
 	}))
 	defer srv.Close()
@@ -318,6 +320,20 @@ func TestFetchDocInfoValidConfig(t *testing.T) {
 	}
 	if !strings.Contains(info.WsURL, "doc-key-1") {
 		t.Errorf("WsURL = %q, want it to contain the doc key", info.WsURL)
+	}
+
+	// Guards the actual production issue this is fixing: a request that
+	// sets only User-Agent (and a bare, incomplete one at that) isn't a
+	// shape any real browser produces - itself a bot-detection signal
+	// independent of the requesting IP's own reputation.
+	if ua := gotHeaders.Get("User-Agent"); ua != browserUserAgent {
+		t.Errorf("User-Agent = %q, want %q", ua, browserUserAgent)
+	}
+	if gotHeaders.Get("Accept") == "" {
+		t.Error("Accept header missing - real browsers always send one")
+	}
+	if gotHeaders.Get("Accept-Language") == "" {
+		t.Error("Accept-Language header missing - real browsers always send one")
 	}
 }
 

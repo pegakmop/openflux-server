@@ -206,10 +206,17 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			NetDialContext:    transport.ProtectedDialer().DialContext,
 		}
 		headers := http.Header{}
-		headers.Set("User-Agent", "Mozilla/5.0")
+		headers.Set("User-Agent", browserUserAgent)
 		headers.Set("Origin", info.Origin)
 		headers.Set("Cookie", info.CookieStr)
 		headers.Set("Host", info.Host)
+		// A WebSocket upgrade, not a page load - Sec-Fetch-Dest/Mode differ
+		// from applyBrowserGetHeaders' document-navigation values
+		// accordingly (real Firefox sends these for a same-origin WS
+		// connection opened from a page it just loaded).
+		headers.Set("Sec-Fetch-Dest", "websocket")
+		headers.Set("Sec-Fetch-Mode", "websocket")
+		headers.Set("Sec-Fetch-Site", "same-origin")
 
 		conn, _, err := dialer.Dial(info.WsURL, headers)
 		if err != nil {
@@ -618,7 +625,7 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	}
 
 	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
+	applyBrowserGetHeaders(req.Header)
 	resp, err := client.Do(req)
 	if err != nil {
 		return YandexDocsInfo{}, err

@@ -91,7 +91,14 @@ const (
 	volgaReasonWSReadError  = "ws_read_error"
 )
 
-const volgaUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"
+// volgaUserAgent used to hardcode its own separate fingerprint
+// ("rv:153.0) ... Firefox/153.0" - a Firefox version number well ahead of
+// any real release at the time, itself a plausible bot-detection signal
+// independent of anything else. Now shares browserUserAgent (see
+// browser_ua.go) so this and fetchDocInfo/the WebSocket dial in yandex.go
+// always present the same, currently-real browser identity rather than
+// three different invented ones.
+const volgaUserAgent = browserUserAgent
 
 var reClientConfig = regexp.MustCompile(`<script[^>]*id="client-config"[^>]*>(.*?)</script>`)
 
