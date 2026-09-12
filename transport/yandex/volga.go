@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -442,6 +443,9 @@ type relayClient struct {
 
 	mu       sync.Mutex
 	frontier string
+
+	recentSentMu sync.Mutex
+	recentSent   map[uint32]time.Time
 }
 
 func newRelayClient(auth *volgaAuth, cfg VolgaConfig, stats *VolgaStats) *relayClient {
@@ -574,6 +578,7 @@ func (r *relayClient) sendBatch(batch [][]byte) error {
 		totalBytes += len(p)
 	}
 
+	r.markSent(blob.Bytes())
 	encoded := base64Encode(blob.Bytes())
 	blobBufPool.Put(blob)
 
@@ -669,6 +674,45 @@ func (r *relayClient) sendBatch(batch [][]byte) error {
 	r.stats.PacketsBatched.Add(uint64(len(batch)))
 	r.stats.BytesSent.Add(uint64(totalBytes))
 	return nil
+}
+
+// markSent/wasRecentlySent dedup a whole sent batch's raw blob (the exact
+// bytes that get base64'd into the relay POST) so wsListener can recognize
+// its own traffic bounced back through push.yandex.ru's broadcast and drop
+// it - the same content-hash approach yandex.go needed for its engine.io
+// echo, and for the same reason: the wire-level "is this mine?" signal
+// (there, session identity; here, inner.UserID) turned out not to reliably
+// distinguish sender from peer on an anonymous, no-login share link, where
+// Yandex can hand out the same guest identity to every viewer. A CRC32 of
+// the actual bytes has no such dependency on identity being distinct.
+func (r *relayClient) markSent(data []byte) {
+	h := crc32.ChecksumIEEE(data)
+	now := time.Now()
+
+	r.recentSentMu.Lock()
+	defer r.recentSentMu.Unlock()
+	if r.recentSent == nil {
+		r.recentSent = make(map[uint32]time.Time)
+	}
+	r.recentSent[h] = now
+	if len(r.recentSent) > 512 {
+		cutoff := now.Add(-5 * time.Second)
+		for k, ts := range r.recentSent {
+			if ts.Before(cutoff) {
+				delete(r.recentSent, k)
+			}
+		}
+	}
+}
+
+func (r *relayClient) wasRecentlySent(data []byte) bool {
+	h := crc32.ChecksumIEEE(data)
+
+	r.recentSentMu.Lock()
+	ts, ok := r.recentSent[h]
+	r.recentSentMu.Unlock()
+
+	return ok && time.Since(ts) < 5*time.Second
 }
 
 func (r *relayClient) SetFrontier(opID string) {
@@ -855,10 +899,16 @@ func (w *wsListener) handleMessage(raw []byte) {
 		return
 	}
 
-	if inner.UserID == w.auth.UserID {
-		return
-	}
-
+	// inner.UserID used to be compared against w.auth.UserID here to drop
+	// self-echo, on the assumption that Yandex always hands each viewer of
+	// the doc a distinct numeric identity. On an anonymous, no-login share
+	// link that assumption doesn't hold - both sides of the tunnel can end
+	// up with the same guest UserID, which made this comparison true for
+	// every message, not just our own, and silently dropped 100% of the
+	// peer's real traffic ("sends fine, never receives anything"). Self-echo
+	// is now caught downstream by content hash instead (see
+	// relayClient.wasRecentlySent), which doesn't depend on identity being
+	// distinct.
 	switch inner.T {
 	case "relay":
 		w.handleRelayMessage(inner.Message)
@@ -914,6 +964,10 @@ func (w *wsListener) handleBundleItem(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &asStr); err == nil && asStr != "" {
 		decoded, err := base64.StdEncoding.DecodeString(asStr)
 		if err != nil {
+			return
+		}
+		if w.relay.wasRecentlySent(decoded) {
+			utils.Debugf("[VOLGA] dropped self-echo batch (%d bytes)", len(decoded))
 			return
 		}
 		packets := decodeBatch(decoded)
