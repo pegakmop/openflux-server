@@ -151,8 +151,14 @@ func (s *Store) ListKeys(ctx context.Context, f ListKeysFilter) ([]model.Key, er
 // with an unchanged doc_url).
 func (s *Store) HasEnabledKeyWithDocURL(ctx context.Context, docURL, excludeID string) (bool, error) {
 	var exists bool
+	// excludeID is "" on creation (there's no id yet) - id is uuid, and
+	// casting "" to uuid errors outright ("invalid input syntax for type
+	// uuid"), which used to surface here as "check doc_url failed" on every
+	// single key creation. $2 = '' short-circuits before the ::uuid cast
+	// ever runs, the same idiom ListKeys already uses above for its own
+	// optional owner_ref filter.
 	err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM keys WHERE doc_url = $1 AND enabled = true AND id != $2)
+		SELECT EXISTS(SELECT 1 FROM keys WHERE doc_url = $1 AND enabled = true AND ($2 = '' OR id != $2::uuid))
 	`, docURL, excludeID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("check doc_url in use: %w", err)
