@@ -1,8 +1,8 @@
 package tunnel
 
 import (
+	"bytes"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +21,7 @@ type RawSocketEndpoint struct {
 	sendFd          int
 	recvFd          int
 	nicID           tcpip.NICID
+	localIP         [4]byte
 	packetIn        atomic.Uint64
 	packetOut       atomic.Uint64
 	outgoingSYNs    sync.Map
@@ -60,6 +61,7 @@ func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 		recvFd: recvFd,
 		nicID:  nicID,
 	}
+	fmt.Sscanf(getLocalIP(), "%d.%d.%d.%d", &ep.localIP[0], &ep.localIP[1], &ep.localIP[2], &ep.localIP[3])
 
 	go ep.readLoop()
 	return ep, nil
@@ -88,10 +90,8 @@ func (e *RawSocketEndpoint) readLoop() {
 
 		protocol := buf[9]
 		flags := buf[33]
-		dstIP := net.IP(buf[16:20])
-		localIP := getLocalIP()
 
-		if protocol == 6 && dstIP.String() == localIP {
+		if protocol == 6 && bytes.Equal(buf[16:20], e.localIP[:]) {
 			dstPort := uint16(buf[22])<<8 | uint16(buf[23])
 
 			if _, active := e.activePorts.Load(dstPort); !active {
@@ -147,10 +147,7 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 		pktCopy := make([]byte, len(ipPacket))
 		copy(pktCopy, ipPacket)
 
-		localIP := getLocalIP()
-		var localIPBytes [4]byte
-		fmt.Sscanf(localIP, "%d.%d.%d.%d", &localIPBytes[0], &localIPBytes[1], &localIPBytes[2], &localIPBytes[3])
-		copy(pktCopy[12:16], localIPBytes[:])
+		copy(pktCopy[12:16], e.localIP[:])
 
 		pktCopy[10] = 0
 		pktCopy[11] = 0

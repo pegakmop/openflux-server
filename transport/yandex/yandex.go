@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,17 +74,34 @@ func (s *DocSession) safeWrite(messageType int, data []byte) error {
 type YandexDocsTransport struct {
 	*transport.BaseTransport
 
-	url     string
-	session *DocSession
+	url        string
+	session    *DocSession
+	httpClient *http.Client
 
 	userCounter atomic.Int32
 	baseUserID  string
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
+	jar, _ := cookiejar.New(nil)
 	t := &YandexDocsTransport{
 		BaseTransport: transport.NewBaseTransport(config),
 		url:           url,
+		// A fresh, jarless http.Client per fetch (the old behavior) meant
+		// every retry looked like a brand-new anonymous visitor - no
+		// Set-Cookie response (including on the redirects this request
+		// follows) was ever carried into the next request. Yandex appears to
+		// use that session-continuity signal when deciding whether to serve
+		// the real editable session or a stripped-down view-only page with
+		// officeActionData.editor_config == null (see fetchDocInfo) - one
+		// persistent client+jar, reused across every reconnect attempt for
+		// this transport's lifetime, is what a real browser does too.
+		httpClient: &http.Client{
+			Jar:           jar,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil },
+			Timeout:       30 * time.Second,
+			Transport:     &http.Transport{DialContext: transport.ProtectedDialer().DialContext},
+		},
 	}
 	t.baseUserID = randUserID()
 	return t
@@ -470,15 +488,9 @@ func (t *YandexDocsTransport) backoffDelay(attempt int) time.Duration {
 }
 
 func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, error) {
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil },
-		Timeout:       30 * time.Second,
-		Transport:     &http.Transport{DialContext: transport.ProtectedDialer().DialContext},
-	}
-
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := client.Do(req)
+	resp, err := t.httpClient.Do(req)
 	if err != nil {
 		return YandexDocsInfo{}, err
 	}
