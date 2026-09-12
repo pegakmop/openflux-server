@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"openflux-control/internal/auth"
+	"openflux-control/internal/model"
 	"openflux-control/internal/store"
 )
 
@@ -53,6 +55,9 @@ func (a *App) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeInternalError(w, r, "list nodes failed", err)
 		return
+	}
+	if nodes == nil {
+		nodes = []model.Node{}
 	}
 	writeJSON(w, http.StatusOK, nodes)
 }
@@ -115,6 +120,9 @@ func (a *App) handleListIngestTokens(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, "list ingest tokens failed", err)
 		return
 	}
+	if tokens == nil {
+		tokens = []model.IngestToken{}
+	}
 	writeJSON(w, http.StatusOK, tokens)
 }
 
@@ -132,10 +140,20 @@ func (a *App) handleSetIngestTokenEnabled(enabled bool) http.HandlerFunc {
 }
 
 func (a *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := a.Store.ListKeys(r.Context(), store.ListKeysFilter{OwnerRef: r.URL.Query().Get("owner_ref")})
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	keys, err := a.Store.ListKeys(r.Context(), store.ListKeysFilter{
+		OwnerRef: q.Get("owner_ref"),
+		Limit:    limit,
+		Offset:   offset,
+	})
 	if err != nil {
 		writeInternalError(w, r, "list keys failed", err)
 		return
+	}
+	if keys == nil {
+		keys = []model.Key{}
 	}
 	writeJSON(w, http.StatusOK, keys)
 }
