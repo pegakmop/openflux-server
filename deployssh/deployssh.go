@@ -68,6 +68,10 @@ type DeployOptions struct {
 	RegisterNode bool
 	NodeName     string
 	NodeMaxKeys  int
+	// RunNodeHere, when RegisterNode is true, also builds and runs the exit
+	// node right on this same server as a systemd service instead of just
+	// registering it in the database - see RUN_NODE_HERE in install.sh.
+	RunNodeHere bool
 }
 
 // Callback receives live progress from Deploy.
@@ -252,6 +256,7 @@ func buildRemoteCommand(opts DeployOptions) string {
 		"REGISTER_NODE": boolToYN(opts.RegisterNode),
 		"NODE_NAME":     opts.NodeName,
 		"NODE_MAX_KEYS": strconv.Itoa(opts.NodeMaxKeys),
+		"RUN_NODE_HERE": boolToYN(opts.RunNodeHere),
 	}
 
 	var b strings.Builder
@@ -259,7 +264,7 @@ func buildRemoteCommand(opts DeployOptions) string {
 	fmt.Fprintf(&b, "curl -fsSL %s -o /tmp/openflux-install.sh; ", shellQuote(scriptURL))
 	for _, key := range []string{
 		"REPO_URL", "GIT_REF", "TLS_MODE", "DOMAIN", "LE_EMAIL", "SERVER_IP",
-		"ADMIN_TOKEN", "DB_PASSWORD", "REGISTER_NODE", "NODE_NAME", "NODE_MAX_KEYS",
+		"ADMIN_TOKEN", "DB_PASSWORD", "REGISTER_NODE", "NODE_NAME", "NODE_MAX_KEYS", "RUN_NODE_HERE",
 	} {
 		v := env[key]
 		if v == "" {

@@ -55,6 +55,9 @@ func TestBuildRemoteCommandIncludesDefaultsAndQuoting(t *testing.T) {
 	if !strings.Contains(cmd, "export REGISTER_NODE='n';") {
 		t.Errorf("REGISTER_NODE=n must be explicit (not omitted) so it overrides install.sh's own default: %s", cmd)
 	}
+	if !strings.Contains(cmd, "export RUN_NODE_HERE='n';") {
+		t.Errorf("RUN_NODE_HERE=n must be explicit (not omitted) so it overrides install.sh's own default: %s", cmd)
+	}
 	if strings.Contains(cmd, "SERVER_IP") {
 		t.Errorf("SERVER_IP is blank in domain mode and should not appear at all: %s", cmd)
 	}

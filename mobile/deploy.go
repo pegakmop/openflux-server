@@ -38,6 +38,7 @@ type deployOptionsJSON struct {
 	RegisterNode    bool   `json:"register_node"`
 	NodeName        string `json:"node_name"`
 	NodeMaxKeys     int    `json:"node_max_keys"`
+	RunNodeHere     bool   `json:"run_node_here"`
 }
 
 // DeployCallback receives live progress from Deploy. Implemented on the
@@ -89,6 +90,7 @@ func Deploy(targetJSON string, optsJSON string, cb DeployCallback) error {
 			RegisterNode:    opts.RegisterNode,
 			NodeName:        opts.NodeName,
 			NodeMaxKeys:     opts.NodeMaxKeys,
+			RunNodeHere:     opts.RunNodeHere,
 		},
 		deployCallbackAdapter{cb},
 	)
