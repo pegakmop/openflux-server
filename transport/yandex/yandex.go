@@ -18,7 +18,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"universal-bypass-tool/network"
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
 )
@@ -381,7 +380,13 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 
 		t.markSent(packet)
 		if utils.IsVerbose() {
-			utils.Debugf("[YDOCS] -> %d bytes - %s\n", len(packet), network.ParsePacketInfo(packet))
+			// packet is whatever the caller handed to Send() - when wrapped
+			// in transport.CompressedTransport (the normal case), that's
+			// already-compressed bytes, not a raw IP packet, so parsing it
+			// as one here would print convincing-looking nonsense (garbage
+			// addresses/protocol numbers) instead of failing loudly. Byte
+			// count is the only thing safe to claim about it at this layer.
+			utils.Debugf("[YDOCS] -> %d bytes\n", len(packet))
 		}
 
 		payload := base64.StdEncoding.EncodeToString(packet)
@@ -503,7 +508,9 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		}
 
 		if utils.IsVerbose() {
-			utils.Debugf("[YDOCS] <- %d bytes - %s\n", len(decoded), network.ParsePacketInfo(decoded))
+			// Same caveat as writerLoop's "-> N bytes" line: decoded is
+			// still pre-decompression at this layer, not a raw IP packet.
+			utils.Debugf("[YDOCS] <- %d bytes\n", len(decoded))
 		}
 
 		t.RecordReceive(len(decoded))
