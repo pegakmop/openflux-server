@@ -8,7 +8,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"net/http/cookiejar"
 	"regexp"
 	"strconv"
 	"strings"
@@ -74,34 +73,17 @@ func (s *DocSession) safeWrite(messageType int, data []byte) error {
 type YandexDocsTransport struct {
 	*transport.BaseTransport
 
-	url        string
-	session    *DocSession
-	httpClient *http.Client
+	url     string
+	session *DocSession
 
 	userCounter atomic.Int32
 	baseUserID  string
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
-	jar, _ := cookiejar.New(nil)
 	t := &YandexDocsTransport{
 		BaseTransport: transport.NewBaseTransport(config),
 		url:           url,
-		// A fresh, jarless http.Client per fetch (the old behavior) meant
-		// every retry looked like a brand-new anonymous visitor - no
-		// Set-Cookie response (including on the redirects this request
-		// follows) was ever carried into the next request. Yandex appears to
-		// use that session-continuity signal when deciding whether to serve
-		// the real editable session or a stripped-down view-only page with
-		// officeActionData.editor_config == null (see fetchDocInfo) - one
-		// persistent client+jar, reused across every reconnect attempt for
-		// this transport's lifetime, is what a real browser does too.
-		httpClient: &http.Client{
-			Jar:           jar,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil },
-			Timeout:       30 * time.Second,
-			Transport:     &http.Transport{DialContext: transport.ProtectedDialer().DialContext},
-		},
 	}
 	t.baseUserID = randUserID()
 	return t
@@ -335,18 +317,30 @@ func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token strin
 
 func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 	for t.IsRunning() {
+		// t.session is never nil'd on disconnect (see connectToDoc) - it
+		// keeps pointing at the old, now-dead session until a new one
+		// replaces it, so checking session/session.Conn for nil here never
+		// actually catches a drop. Without also checking IsConnected(),
+		// this dequeued a packet from the queue - the one piece of state
+		// Send's fix relies on to survive a reconnect - and then threw it
+		// away on the write to that dead connection anyway, every single
+		// time. Waiting for IsConnected() before ever touching the channel
+		// is what actually keeps queued data queued until a live session
+		// exists to drain it into.
+		t.Mu.RLock()
+		session := t.session
+		connected := t.IsConnected()
+		t.Mu.RUnlock()
+		if session == nil || session.Conn == nil || !connected {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
 		var packet []byte
 		select {
 		case packet = <-queue:
 		case <-time.After(200 * time.Millisecond):
 			// Nothing to send; loop back around just to re-check IsRunning.
-			continue
-		}
-
-		t.Mu.RLock()
-		session := t.session
-		t.Mu.RUnlock()
-		if session == nil || session.Conn == nil {
 			continue
 		}
 
@@ -488,9 +482,15 @@ func (t *YandexDocsTransport) backoffDelay(attempt int) time.Duration {
 }
 
 func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, error) {
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil },
+		Timeout:       30 * time.Second,
+		Transport:     &http.Transport{DialContext: transport.ProtectedDialer().DialContext},
+	}
+
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := t.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return YandexDocsInfo{}, err
 	}
