@@ -104,6 +104,41 @@ func b64(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
+// --- normalizeDocURL -------------------------------------------------
+
+// TestNormalizeDocURLRewritesDiskShareLinks guards the actual feature this
+// function exists for: disk.yandex.ru/i/<hash> share links (what a user
+// gets from Yandex Disk's own "share" button) and docs.yandex.ru edit links
+// serve the same client-config-bearing page for a supported document under
+// different hostnames - fetchDocInfo only knows how to ask docs.yandex.ru,
+// so a share link must be rewritten before it ever reaches an HTTP request.
+func TestNormalizeDocURLRewritesDiskShareLinks(t *testing.T) {
+	cases := map[string]string{
+		"https://disk.yandex.ru/i/AbCdEfGh123":         "https://docs.yandex.ru/i/AbCdEfGh123",
+		"http://disk.yandex.ru/i/xyz?foo=bar":          "http://docs.yandex.ru/i/xyz?foo=bar",
+		"https://DISK.YANDEX.RU/i/CaseInsensitiveHost": "https://docs.yandex.ru/i/CaseInsensitiveHost",
+		// Already a docs.yandex.ru link - must pass through byte-for-byte.
+		"https://docs.yandex.ru/docs/edit?url=abc": "https://docs.yandex.ru/docs/edit?url=abc",
+		// A disk.yandex.ru path that isn't a /i/ share link - left alone
+		// for the actual HTTP fetch to accept or reject, not guessed at.
+		"https://disk.yandex.ru/d/FolderShareLink": "https://disk.yandex.ru/d/FolderShareLink",
+		// Malformed - returned unchanged rather than dropped.
+		"not a url at all": "not a url at all",
+	}
+	for in, want := range cases {
+		if got := normalizeDocURL(in); got != want {
+			t.Errorf("normalizeDocURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNewYandexDocsTransportNormalizesDiskShareLink(t *testing.T) {
+	tr := NewYandexDocsTransport("https://disk.yandex.ru/i/AbCdEfGh123", transport.DefaultConfig())
+	if tr.url != "https://docs.yandex.ru/i/AbCdEfGh123" {
+		t.Errorf("tr.url = %q, want the disk.yandex.ru link rewritten to docs.yandex.ru", tr.url)
+	}
+}
+
 // --- backoffDelay -----------------------------------------------------
 
 func TestBackoffDelayGrowsAndCaps(t *testing.T) {

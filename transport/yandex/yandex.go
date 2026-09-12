@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -102,10 +103,33 @@ type YandexDocsTransport struct {
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
 	t := &YandexDocsTransport{
 		BaseTransport: transport.NewBaseTransport(config),
-		url:           url,
+		url:           normalizeDocURL(url),
 	}
 	t.baseUserID = randUserID()
 	return t
+}
+
+// normalizeDocURL rewrites a Yandex Disk share link into the equivalent
+// Yandex Docs URL fetchDocInfo actually knows how to fetch. A disk.yandex.ru
+// "/i/<hash>" share link and the docs.yandex.ru edit link serve the same
+// client-config-bearing page for a supported document, just under
+// different hostnames - a plain host swap is all that's needed, path and
+// query string carry over untouched. Used on both the client and the
+// exit-node side, since both run this same transport - one normalization
+// site covers whichever end of the tunnel a user pastes a disk.yandex.ru
+// link into. Anything else (a different host, a malformed URL, a
+// disk.yandex.ru path that isn't a share link) passes through unchanged
+// and is left for the actual HTTP fetch to accept or reject.
+func normalizeDocURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if strings.EqualFold(u.Hostname(), "disk.yandex.ru") && strings.HasPrefix(u.Path, "/i/") {
+		u.Host = "docs.yandex.ru"
+		return u.String()
+	}
+	return raw
 }
 
 func (t *YandexDocsTransport) Start() error {
