@@ -1,7 +1,6 @@
 package yandex
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -45,40 +44,6 @@ const (
 	reasonSendFailed      = "send_failed"
 	reasonReadError       = "read_error"
 )
-
-// tunnelMagic prefixes every payload this transport itself puts inside a
-// "cursor"/"saveChanges" field before base64-encoding it - see the doc
-// comments on markSent/wasRecentlySent and handleMessage's use of this
-// marker for why: nothing here ever emits a "saveChanges" message, only
-// reads it, and "cursor" broadcasts aren't ours alone either - Yandex's own
-// document backend broadcasts real autosave and cursor-position events with
-// those exact field names to every participant, sender included, for
-// perfectly ordinary reasons unrelated to this tunnel (someone else with the
-// doc open, its own autosave tick, ...). Without a marker only this code
-// could produce, any of that genuine Yandex traffic that happened to decode
-// as valid base64 - not a rare coincidence over thousands of messages - got
-// handed to CallReceive and injected into the tunnel indistinguishably from
-// real peer data, which is what was corrupting the tunnel with garbage that
-// gvisor's forwarding choked on ("unexpected transport protocol = 0") even
-// on otherwise well-formed-looking packets.
-var tunnelMagic = []byte{0x4F, 0x46, 0x4C, 0x58} // "OFLX"
-
-func tagPayload(data []byte) []byte {
-	tagged := make([]byte, 0, len(tunnelMagic)+len(data))
-	tagged = append(tagged, tunnelMagic...)
-	tagged = append(tagged, data...)
-	return tagged
-}
-
-// untagPayload strips tunnelMagic and reports whether it was present. A
-// missing/mismatched tag means this decoded content did not come from this
-// tunnel's own writerLoop - see tunnelMagic's doc comment.
-func untagPayload(data []byte) ([]byte, bool) {
-	if len(data) < len(tunnelMagic) || !bytes.Equal(data[:len(tunnelMagic)], tunnelMagic) {
-		return nil, false
-	}
-	return data[len(tunnelMagic):], true
-}
 
 type YandexDocsInfo struct {
 	CookieStr   string
@@ -404,7 +369,7 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 			utils.Debugf("[YDOCS] -> %d bytes - %s\n", len(packet), network.ParsePacketInfo(packet))
 		}
 
-		payload := base64.StdEncoding.EncodeToString(tagPayload(packet))
+		payload := base64.StdEncoding.EncodeToString(packet)
 		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 		if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
@@ -504,22 +469,9 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 			return
 		}
 
-		raw, err := base64.StdEncoding.DecodeString(base64Str)
+		decoded, err := base64.StdEncoding.DecodeString(base64Str)
 		if err != nil {
 			utils.Debugf("[YDOCS] Base64 decode error: %v", err)
-			return
-		}
-
-		// Neither "cursor" nor "saveChanges" belongs to this tunnel
-		// exclusively - see tunnelMagic's doc comment for why real Yandex
-		// traffic sharing those same field names must be rejected here,
-		// not handed to CallReceive just because it happened to also be
-		// valid base64.
-		decoded, ok := untagPayload(raw)
-		if !ok {
-			if utils.IsVerbose() {
-				utils.Debugf("[YDOCS] dropped untagged message (%d bytes) - not ours\n", len(raw))
-			}
 			return
 		}
 

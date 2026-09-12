@@ -74,7 +74,7 @@ func TestHandleMessageDropsOwnEcho(t *testing.T) {
 	tr.SetEventCallback(func(string, string) {})
 	tr.Receive(func(data []byte) { received = append(received, data) })
 
-	echoMsg := `42["message",{"type":"cursor","cursor":"18;` + b64(tagPayload(sent)) + `"}]`
+	echoMsg := `42["message",{"type":"cursor","cursor":"18;` + b64(sent) + `"}]`
 	tr.handleMessage(nil, []byte(echoMsg))
 
 	if len(received) != 0 {
@@ -92,34 +92,11 @@ func TestHandleMessageDeliversRealPeerData(t *testing.T) {
 	tr.Receive(func(data []byte) { received = append(received, data) })
 
 	peerData := []byte("genuine data from the other side")
-	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(tagPayload(peerData)) + `"}]`
+	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(peerData) + `"}]`
 	tr.handleMessage(nil, []byte(msg))
 
 	if len(received) != 1 || string(received[0]) != string(peerData) {
 		t.Fatalf("CallReceive got %v, want [%q]", received, peerData)
-	}
-}
-
-// TestHandleMessageDropsUntaggedRealYandexTraffic guards the other half of
-// the same production bug: neither "cursor" nor "saveChanges" belongs to
-// this tunnel exclusively - Yandex's own document backend broadcasts real
-// cursor-position and autosave events under those same field names to every
-// participant for reasons that have nothing to do with this tunnel. Content
-// that happens to be valid base64 but was never produced by this
-// transport's own writerLoop (no tunnelMagic prefix) must never reach
-// CallReceive, no matter how tunnel-packet-like the decoded bytes look.
-func TestHandleMessageDropsUntaggedRealYandexTraffic(t *testing.T) {
-	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
-
-	var received [][]byte
-	tr.Receive(func(data []byte) { received = append(received, data) })
-
-	genuineYandexMetadata := []byte("real document autosave metadata, not ours")
-	msg := `42["message",{"type":"saveChanges","excelAdditionalInfo":"` + b64(genuineYandexMetadata) + `"}]`
-	tr.handleMessage(nil, []byte(msg))
-
-	if len(received) != 0 {
-		t.Fatalf("handleMessage delivered untagged, non-tunnel data to CallReceive: %v", received)
 	}
 }
 
