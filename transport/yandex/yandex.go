@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"universal-bypass-tool/network"
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
 )
@@ -399,6 +400,9 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 		}
 
 		t.markSent(packet)
+		if utils.IsVerbose() {
+			utils.Debugf("[YDOCS] -> %d bytes - %s\n", len(packet), network.ParsePacketInfo(packet))
+		}
 
 		payload := base64.StdEncoding.EncodeToString(tagPayload(packet))
 		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
@@ -513,6 +517,9 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		// valid base64.
 		decoded, ok := untagPayload(raw)
 		if !ok {
+			if utils.IsVerbose() {
+				utils.Debugf("[YDOCS] dropped untagged message (%d bytes) - not ours\n", len(raw))
+			}
 			return
 		}
 
@@ -522,7 +529,14 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		// doc comment on YandexDocsTransport for why this bit us badly:
 		// it isn't a rare glitch, it's every single packet we send.
 		if t.wasRecentlySent(decoded) {
+			if utils.IsVerbose() {
+				utils.Debugf("[YDOCS] dropped self-echo (%d bytes)\n", len(decoded))
+			}
 			return
+		}
+
+		if utils.IsVerbose() {
+			utils.Debugf("[YDOCS] <- %d bytes - %s\n", len(decoded), network.ParsePacketInfo(decoded))
 		}
 
 		t.RecordReceive(len(decoded))
