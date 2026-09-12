@@ -142,6 +142,24 @@ func (s *Store) ListKeys(ctx context.Context, f ListKeysFilter) ([]model.Key, er
 	return out, rows.Err()
 }
 
+// HasEnabledKeyWithDocURL reports whether some other enabled key already
+// uses docURL. Yandex broadcasts every "cursor"/"saveChanges" event in a
+// document to every participant, sender included - two keys sharing one
+// document means two independent tunnels sit in the same broadcast room and
+// each one's traffic gets reinjected into the other's, corrupting both.
+// excludeID skips a key checking against itself (e.g. re-enabling itself
+// with an unchanged doc_url).
+func (s *Store) HasEnabledKeyWithDocURL(ctx context.Context, docURL, excludeID string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM keys WHERE doc_url = $1 AND enabled = true AND id != $2)
+	`, docURL, excludeID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check doc_url in use: %w", err)
+	}
+	return exists, nil
+}
+
 func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE keys SET enabled = $1, updated_at = now() WHERE id = $2`, enabled, id)
 	if err != nil {

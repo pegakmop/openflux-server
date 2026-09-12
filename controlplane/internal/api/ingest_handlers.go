@@ -61,12 +61,36 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		return
 	}
 
+	// Tracks doc_urls claimed earlier in this same batch, since
+	// HasEnabledKeyWithDocURL only sees keys already committed to the
+	// database - two entries in one bulk-import request sharing a doc_url
+	// would otherwise both pass that check before either is inserted.
+	docURLsInBatch := make(map[string]bool, len(reqs))
+
 	created := make([]createdKey, 0, len(reqs))
 	for _, req := range reqs {
 		if req.DocURL == "" {
 			writeError(w, http.StatusBadRequest, "doc_url is required for every key")
 			return
 		}
+		// Two enabled keys sharing one Yandex Docs document sit in the same
+		// broadcast room - see HasEnabledKeyWithDocURL's doc comment - and a
+		// new key is enabled immediately (enabled defaults to true), so this
+		// has to be checked at creation time, not just when re-enabling one.
+		if docURLsInBatch[req.DocURL] {
+			writeError(w, http.StatusConflict, "doc_url is used by more than one key in this request - each key needs its own Yandex Docs document")
+			return
+		}
+		inUse, err := a.Store.HasEnabledKeyWithDocURL(r.Context(), req.DocURL, "")
+		if err != nil {
+			writeInternalError(w, r, "check doc_url failed", err)
+			return
+		}
+		if inUse {
+			writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
+			return
+		}
+		docURLsInBatch[req.DocURL] = true
 		if req.Transport == "" {
 			req.Transport = "yandex"
 		}

@@ -226,7 +226,33 @@ func (a *App) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := a.Store.SetKeyEnabled(r.Context(), r.PathValue("id"), enabled); err == store.ErrNotFound {
+		id := r.PathValue("id")
+
+		// Only re-enabling needs the doc_url check: a disabled key isn't
+		// running a worker and can't collide with anything (see
+		// HasEnabledKeyWithDocURL's doc comment), and disabling never
+		// changes doc_url so it can't create a collision either.
+		if enabled {
+			k, err := a.Store.GetKeyByID(r.Context(), id)
+			if err == store.ErrNotFound {
+				writeError(w, http.StatusNotFound, "key not found")
+				return
+			} else if err != nil {
+				writeInternalError(w, r, "get key failed", err)
+				return
+			}
+			inUse, err := a.Store.HasEnabledKeyWithDocURL(r.Context(), k.DocURL, id)
+			if err != nil {
+				writeInternalError(w, r, "check doc_url failed", err)
+				return
+			}
+			if inUse {
+				writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
+				return
+			}
+		}
+
+		if err := a.Store.SetKeyEnabled(r.Context(), id, enabled); err == store.ErrNotFound {
 			writeError(w, http.StatusNotFound, "key not found")
 			return
 		} else if err != nil {
