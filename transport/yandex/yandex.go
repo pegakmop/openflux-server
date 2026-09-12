@@ -689,13 +689,19 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 
 	balancerURL, ok := officeAction["balancer_url"].(string)
 	if !ok {
-		// Seen in production without a captcha/error page - officeActionData
-		// and editor_config both present, just missing/renamed this one
-		// field. Logging both levels' keys is the only way to tell "Yandex
-		// reshaped this response" from "malformed for some other reason"
-		// without reproducing it by hand.
+		// Confirmed in production: this exact signature (officeActionData +
+		// editor_config both present, only balancer_url missing - not a
+		// captcha or error page, which would fail the "config not found"
+		// check above instead) is what a newer-generation Yandex document
+		// looks like to this transport. This transport (the classic
+		// engine.io/socket.io editor session docs.yandex.ru serves) doesn't
+		// know how to talk to those; YandexVolgaTransport does (a different
+		// auth flow entirely - see volga.go's authorize()). There's no way
+		// to tell a document is this type before hitting this error - it's
+		// specific to the individual doc, not the URL shape - so the best
+		// this can do is name the actual fix instead of a bare parse error.
 		utils.Debugf("[YDOCS] officeActionData keys: %v, editor_config keys: %v", mapKeys(officeAction), mapKeys(editorConfigRaw))
-		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing or malformed")
+		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing - this document looks like a newer Yandex Docs type this transport doesn't support; try the Volga transport for this doc_url instead")
 	}
 	host := strings.TrimPrefix(balancerURL, "https://")
 
