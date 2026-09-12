@@ -41,6 +41,14 @@ func (c *MaxClient) Connect() error {
 func (c *MaxClient) SetEventCallback(cb func(MaxPacket)) { c.onEvent = cb }
 
 func (c *MaxClient) readLoop() {
+	// See CallHandler.readLoop's doc comment: an unrecovered panic here
+	// kills the whole exit-node process, every other key's transport
+	// included.
+	defer func() {
+		if r := recover(); r != nil {
+			logError("recovered in MaxClient.readLoop: %v", r)
+		}
+	}()
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -148,6 +156,11 @@ func (c *MaxClient) getUserMap(resp *MaxPacket) map[int64]UserInfo {
 }
 
 func (c *MaxClient) keepalive() {
+	defer func() {
+		if r := recover(); r != nil {
+			logError("recovered in MaxClient.keepalive: %v", r)
+		}
+	}()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {

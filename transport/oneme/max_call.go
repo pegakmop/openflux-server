@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -30,6 +29,16 @@ func (h *CallHandler) Send(data []byte) {
 }
 
 func (h *CallHandler) readLoop() {
+	// This exit-node process serves many keys at once - an unrecovered
+	// panic in any one goroutine kills the whole process, taking every
+	// other key's transport down with it (the same reasoning as
+	// signalReconnect's doc comment, one goroutine's crash isolated from
+	// process-wide).
+	defer func() {
+		if r := recover(); r != nil {
+			logError("recovered in CallHandler.readLoop: %v", r)
+		}
+	}()
 	logInfo("[%s] Signaling connected", h.tag)
 	for {
 		_, message, err := h.conn.ReadMessage()
@@ -83,8 +92,16 @@ func (h *CallHandler) signalReconnect() {
 		default:
 		}
 	} else {
-		logError("[%s] Receiver connection died, exiting", h.tag)
-		os.Exit(1)
+		// This exit-node process can be serving many keys at once (see
+		// nodeagent.Orchestrator) - one MAX key's signaling connection
+		// dying is that key's problem, not every other key's. os.Exit(1)
+		// here used to kill the whole process (every other key's yandex/
+		// volga/max worker included) over a single dropped connection;
+		// there's no auto-reconnect for this role yet (matching upstream,
+		// which sends the same signal into a reconnectCh nothing ever
+		// listens on for this role either), but failing this one call
+		// handler quietly beats taking every other key down with it.
+		logError("[%s] Receiver connection died - this call is over, other keys are unaffected", h.tag)
 	}
 }
 
