@@ -67,12 +67,15 @@ type Protector interface {
 // Config is the JSON contract for StartTunnel, mirroring one Android
 // profile's connection fields. There used to be a second "key" mode where
 // StartTunnel itself resolved a controlplane key token into a doc_url via a
-// live HTTPS request (see resolve.go's ResolveKey) - that request had none
-// of the tunnel's own disguise and was trivial for a hostile network to
-// block outright, so the Android app now resolves once (an explicit,
-// user-initiated action - see ProfileEditScreen's "check key") and caches
-// the result, always calling StartTunnel with the plain doc_url below.
-// ResolveKey itself is unchanged and still used for that one-off check.
+// live HTTPS request (mobile/resolve.go's ResolveKey, since removed
+// entirely) - that request had none of the tunnel's own disguise and was
+// trivial for a hostile network to block outright. The Android app's
+// "Fork" profile mode (formerly "key" mode) now gets doc_url exclusively
+// from data already embedded in an imported deep link or pasted in by
+// hand (see ProfileDeepLink.kt) - there is no code path left, one-off or
+// otherwise, that has this app make a live request to a controlplane to
+// learn where to connect. StartTunnel always receives the plain doc_url
+// below regardless of which UI mode produced it.
 type Config struct {
 	Mode string `json:"mode"` // must be "manual" - see buildTransport
 
