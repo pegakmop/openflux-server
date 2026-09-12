@@ -750,6 +750,13 @@ func (w *wsListener) run() {
 		if strings.HasPrefix(err.Error(), "dial:") {
 			reason = volgaReasonWSDialFailed
 		}
+		// w.emit is BaseTransport.EmitEvent, which is a silent no-op unless
+		// something called SetEventCallback - true for the Android app, but
+		// the exit node (nodeagent.Orchestrator) never does. Without this,
+		// every WS connect/read failure on the exit node - "sends fine,
+		// never receives anything" looks exactly like this from the
+		// client's side - produced zero log output, even with --debug.
+		utils.Debugf("[VOLGA] WS %s (attempt %d): %v", reason, attempt, err)
 		w.emit(transport.EventRetrying, fmt.Sprintf("%d|%d|%s|%s", attempt, int(delay.Seconds()), reason, err.Error()))
 
 		select {
@@ -976,6 +983,7 @@ func (t *YandexVolgaTransport) Start() error {
 	t.EmitEvent(transport.EventConnecting, "1")
 	auth, err := authorize(t.docURL)
 	if err != nil {
+		utils.Debugf("[VOLGA] %s: %v", volgaReasonAuthFailed, err)
 		t.EmitEvent(transport.EventRetrying, fmt.Sprintf("1|0|%s|%s", volgaReasonAuthFailed, err.Error()))
 		return fmt.Errorf("auth: %w", err)
 	}
@@ -996,6 +1004,7 @@ func (t *YandexVolgaTransport) Start() error {
 	t.ws.Start()
 
 	go t.keepAliveLoop()
+	go t.statsLoop()
 	t.SetConnected(true)
 
 	utils.Debugf("[VOLGA] transport started: user=%d(%s) rp=%s", auth.UserID, auth.UserIDStr, auth.RequestPath)
@@ -1041,6 +1050,39 @@ func (t *YandexVolgaTransport) Stats() transport.TransportStats {
 		Reconnects:    t.stats.WSReconnects.Load(),
 		Connected:     t.IsConnected(),
 		Uptime:        base.Uptime,
+	}
+}
+
+// statsLoop is the only thing that would have shown "sends fine, never
+// receives anything" as it's actually happening rather than after the fact:
+// a periodic per-second send/recv rate, independent of whether the WS
+// listener ever logs a connect/read failure at all (it could be connected
+// the whole time and simply never get pushed a message - see handleMessage/
+// handleBundleItem's silent-drop paths). Runs until keepAliveStop closes,
+// same lifecycle as keepAliveLoop.
+func (t *YandexVolgaTransport) statsLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var lastSent, lastBytesSent, lastRecv, lastBytesRecv uint64
+	for {
+		select {
+		case <-t.keepAliveStop:
+			return
+		case <-ticker.C:
+			sent := t.stats.PacketsSent.Load()
+			bytesSent := t.stats.BytesSent.Load()
+			recv := t.stats.PacketsRecv.Load()
+			bytesRecv := t.stats.BytesReceived.Load()
+
+			utils.Debugf("[VOLGA-STATS] send %d pkt/s (%d KB/s) | recv %d pkt/s (%d KB/s) | http-fail %d | ws-reconnects %d",
+				(sent-lastSent)/5, (bytesSent-lastBytesSent)/5/1024,
+				(recv-lastRecv)/5, (bytesRecv-lastBytesRecv)/5/1024,
+				t.stats.HTTPReqsFailed.Load(), t.stats.WSReconnects.Load())
+
+			lastSent, lastBytesSent = sent, bytesSent
+			lastRecv, lastBytesRecv = recv, bytesRecv
+		}
 	}
 }
 
