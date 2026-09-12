@@ -677,32 +677,43 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	// that triggers a reconnect instead.
 	officeAction, ok := config["officeActionData"].(map[string]interface{})
 	if !ok {
+		utils.Debugf("[YDOCS] config top-level keys: %v", mapKeys(config))
 		return YandexDocsInfo{}, fmt.Errorf("officeActionData missing or malformed")
 	}
 
 	editorConfigRaw, ok := officeAction["editor_config"].(map[string]interface{})
 	if !ok || editorConfigRaw == nil {
+		utils.Debugf("[YDOCS] officeActionData keys: %v", mapKeys(officeAction))
 		return YandexDocsInfo{}, fmt.Errorf("editor_config nil - will reconnect")
 	}
 
 	balancerURL, ok := officeAction["balancer_url"].(string)
 	if !ok {
+		// Seen in production without a captcha/error page - officeActionData
+		// and editor_config both present, just missing/renamed this one
+		// field. Logging both levels' keys is the only way to tell "Yandex
+		// reshaped this response" from "malformed for some other reason"
+		// without reproducing it by hand.
+		utils.Debugf("[YDOCS] officeActionData keys: %v, editor_config keys: %v", mapKeys(officeAction), mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing or malformed")
 	}
 	host := strings.TrimPrefix(balancerURL, "https://")
 
 	document, ok := editorConfigRaw["document"].(map[string]interface{})
 	if !ok {
+		utils.Debugf("[YDOCS] editor_config keys: %v", mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("document missing or malformed")
 	}
 
 	token, ok := editorConfigRaw["token"].(string)
 	if !ok {
+		utils.Debugf("[YDOCS] editor_config keys: %v", mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("editor_config.token missing or malformed")
 	}
 
 	docKey, ok := document["key"].(string)
 	if !ok {
+		utils.Debugf("[YDOCS] document keys: %v", mapKeys(document))
 		return YandexDocsInfo{}, fmt.Errorf("document.key missing or malformed")
 	}
 
