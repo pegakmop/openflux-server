@@ -36,13 +36,23 @@ CONTROLPLANE_ADMIN_TOKEN="$(openssl rand -hex 32)" \
 
 ## Admin panel
 
-A self-contained web UI (no build step, no external assets — `internal/api/web/admin.html`,
-embedded into the binary) is served at `/admin/`, in Russian. It's a thin client over the same
-`/v1/admin/*` JSON API described below: paste `CONTROLPLANE_ADMIN_TOKEN` in once (kept in the
-browser's `localStorage`), then a "Keys" tab covers create/list/filter/enable/disable/delete, and
-a "Settings" tab covers the one exit node this deployment registered (status, heartbeat, rotate its
-token) plus ingest-token management. `deploy/install.sh` puts this behind Nginx with a Let's
-Encrypt certificate.
+Two interchangeable frontends are served — pick one, or both:
+
+- **Embedded fallback (Go, always works):** a self-contained HTML page
+  (`internal/api/web/admin.html`, no build step, no external assets) is embedded into the
+  binary and served at `/admin/`, in Russian. Paste `CONTROLPLANE_ADMIN_TOKEN` once (kept in the
+  browser's `localStorage`), then a "Keys" tab covers create/list/filter/enable/disable/delete,
+  and a "Settings" tab covers the registered exit node (status, heartbeat, rotate its token) plus
+  ingest-token management.
+- **Full dashboard (SvelteKit + Bun, recommended):** `controlplane/web` — SvelteKit 5, Tailwind,
+  SSR + client hydration, RU/EN, dark/light theme, QR deep links on key creation, a dashboard with
+  stat cards and a traffic chart, server load card, node/key/ingest management. Ships with a
+  production entry (`bun server.js`, `controlplane/web/README.md`) that also proxies `/v1/*` to
+  this Go process for http-mode deployments without Nginx; in the normal Nginx setup use the split
+  described below so Go never goes through Bun.
+
+Nginx (recommended): `/v1/*` → this Go service on `:8080`, `/admin/*` → Bun on `:3000`. Deploy
+fragments: `controlplane/web/deploy/` (systemd unit, Nginx location, env template).
 
 ## Concepts
 
