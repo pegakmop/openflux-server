@@ -25,6 +25,10 @@ const (
 	defaultDeployScriptURL = "https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/install.sh"
 )
 
+// keepaliveInterval is a var (not a const) so a test can shrink it instead
+// of waiting out the real interval.
+var keepaliveInterval = 30 * time.Second
+
 // SSHTarget describes how to reach and authenticate to the VPS.
 type SSHTarget struct {
 	Host     string
@@ -136,6 +140,34 @@ func Deploy(target SSHTarget, opts DeployOptions, cb Callback) error {
 	defer client.Close()
 
 	cb.OnHostKeyFingerprint(reportedFingerprint)
+
+	// golang.org/x/crypto/ssh sends no keepalive traffic of its own, unlike
+	// a normal ssh(1)/PuTTY client (which is why running install.sh by hand
+	// over a plain SSH session doesn't hit this). install.sh's remote build
+	// steps (go build ./cmd/controlplane, the exit-node binary) can run for
+	// a minute or more with zero output on the channel - long enough for a
+	// NAT/firewall on the path (a mobile carrier's, most likely, given
+	// where this runs) to decide the idle connection is dead and drop it
+	// silently. That surfaces here as session.Wait() returning
+	// *ssh.ExitMissingError ("remote command exited without exit status or
+	// exit signal") - the channel just vanished mid-command, not that the
+	// remote command actually finished and reported anything. A periodic
+	// global request keeps real traffic flowing over the connection so
+	// nothing on the path ever considers it idle.
+	stopKeepalive := make(chan struct{})
+	defer close(stopKeepalive)
+	go func() {
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopKeepalive:
+				return
+			case <-ticker.C:
+				client.SendRequest("keepalive@openflux", true, nil)
+			}
+		}
+	}()
 
 	session, err := client.NewSession()
 	if err != nil {

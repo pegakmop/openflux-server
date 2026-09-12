@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -386,5 +387,107 @@ func TestDeployNonZeroExitIsAnError(t *testing.T) {
 	target := SSHTarget{Host: host, Port: port, Username: "root", AuthMethod: "password", Password: "x"}
 	if err := Deploy(target, DeployOptions{}, cb); err == nil {
 		t.Fatalf("expected an error when the remote script exits non-zero")
+	}
+}
+
+// --- keepalive --------------------------------------------------------
+
+// TestDeploySendsKeepaliveDuringQuietRemoteCommand guards the actual
+// production bug this exists for: golang.org/x/crypto/ssh sends no
+// keepalive traffic of its own, unlike a normal ssh(1) client - a remote
+// command that produces no output for a while (install.sh's `go build`
+// steps routinely do) can sit on an otherwise-idle connection long enough
+// for a NAT/firewall on the path to drop it, which session.Wait() then
+// reports as *ssh.ExitMissingError, not as a network error -
+// "remote command exited without exit status or exit signal" from a
+// channel that simply vanished mid-command, not one that actually ran the
+// command and reported something. Shrinks keepaliveInterval and asserts at
+// least one keepalive global request reaches the server while the remote
+// command is still running and producing no output at all.
+func TestDeploySendsKeepaliveDuringQuietRemoteCommand(t *testing.T) {
+	old := keepaliveInterval
+	keepaliveInterval = 20 * time.Millisecond
+	defer func() { keepaliveInterval = old }()
+
+	hostSigner := generateHostSigner(t)
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) { return nil, nil },
+	}
+	config.AddHostKey(hostSigner)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	var mu sync.Mutex
+	keepaliveCount := 0
+
+	go func() {
+		for {
+			nConn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sshConn, chans, reqs, err := ssh.NewServerConn(nConn, config)
+				if err != nil {
+					return
+				}
+				defer sshConn.Close()
+				go func() {
+					for req := range reqs {
+						if req.Type == "keepalive@openflux" {
+							mu.Lock()
+							keepaliveCount++
+							mu.Unlock()
+						}
+						if req.WantReply {
+							req.Reply(true, nil)
+						}
+					}
+				}()
+				for newChannel := range chans {
+					if newChannel.ChannelType() != "session" {
+						newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
+						continue
+					}
+					channel, requests, err := newChannel.Accept()
+					if err != nil {
+						continue
+					}
+					go func() {
+						defer channel.Close()
+						for req := range requests {
+							if req.Type != "exec" {
+								req.Reply(false, nil)
+								continue
+							}
+							req.Reply(true, nil)
+							// Quiet for several keepalive intervals - no
+							// output at all - before finishing, mirroring
+							// install.sh's silent `go build` steps.
+							time.Sleep(200 * time.Millisecond)
+							channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+							return
+						}
+					}()
+				}
+			}()
+		}
+	}()
+
+	host, port := splitHostPort(t, listener.Addr().String())
+	target := SSHTarget{Host: host, Port: port, Username: "root", AuthMethod: "password", Password: "x"}
+	if err := Deploy(target, DeployOptions{}, &testCallback{}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	mu.Lock()
+	got := keepaliveCount
+	mu.Unlock()
+	if got == 0 {
+		t.Errorf("no keepalive requests reached the server during a quiet remote command")
 	}
 }
