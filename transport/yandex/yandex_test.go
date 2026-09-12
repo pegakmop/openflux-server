@@ -1,6 +1,7 @@
 package yandex
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -50,6 +51,57 @@ func TestSendFailsWithNoSessionAtAll(t *testing.T) {
 	if err := tr.Send([]byte("hello")); err == nil {
 		t.Fatalf("expected an error before any session has ever been established")
 	}
+}
+
+// --- self-echo filtering -------------------------------------------------
+
+// TestHandleMessageDropsOwnEcho guards the real production bug behind
+// "unexpected transport protocol = 0": Yandex's doc broadcasts every
+// "cursor" event to every participant, sender included, so a packet this
+// transport itself just sent (via writerLoop, which calls markSent) comes
+// straight back over the same socket. Before wasRecentlySent existed,
+// handleMessage handed that to CallReceive indistinguishably from real
+// peer data, reinjecting our own outgoing traffic into our own tunnel
+// endpoint - a well-formed packet flowing in a direction the gvisor
+// NAT/forwarding on that NIC never expects.
+func TestHandleMessageDropsOwnEcho(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	sent := []byte("own outgoing packet bytes")
+	tr.markSent(sent)
+
+	var received [][]byte
+	tr.SetEventCallback(func(string, string) {})
+	tr.Receive(func(data []byte) { received = append(received, data) })
+
+	echoMsg := `42["message",{"type":"cursor","cursor":"18;` + b64(sent) + `"}]`
+	tr.handleMessage(nil, []byte(echoMsg))
+
+	if len(received) != 0 {
+		t.Fatalf("handleMessage delivered our own echoed packet to CallReceive: %v", received)
+	}
+}
+
+// TestHandleMessageDeliversRealPeerData is TestHandleMessageDropsOwnEcho's
+// counterpart: data this transport never sent must still reach CallReceive
+// - the echo filter must not swallow everything indiscriminately.
+func TestHandleMessageDeliversRealPeerData(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	var received [][]byte
+	tr.Receive(func(data []byte) { received = append(received, data) })
+
+	peerData := []byte("genuine data from the other side")
+	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(peerData) + `"}]`
+	tr.handleMessage(nil, []byte(msg))
+
+	if len(received) != 1 || string(received[0]) != string(peerData) {
+		t.Fatalf("CallReceive got %v, want [%q]", received, peerData)
+	}
+}
+
+func b64(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
 }
 
 // --- backoffDelay -----------------------------------------------------

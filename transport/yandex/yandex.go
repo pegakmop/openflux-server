@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"math/rand"
@@ -78,6 +79,24 @@ type YandexDocsTransport struct {
 
 	userCounter atomic.Int32
 	baseUserID  string
+
+	// recentSent guards against processing our own data. Yandex's doc
+	// broadcasts every "cursor" event to every participant in the
+	// document, sender included - the same self-echo a collaborative
+	// editor's cursor broadcast normally is. Nothing here previously
+	// checked authorship before decoding a "cursor" message and handing it
+	// to CallReceive, so a tunnel packet we ourselves just sent (see
+	// writerLoop) came right back over the same socket and got reinjected
+	// as if the peer had sent it - a real packet, correctly formed, just
+	// flowing in a direction gvisor's NAT/forwarding never expects on that
+	// NIC (that's what "unexpected transport protocol = 0" turned out to
+	// be a symptom of, not a cause). Recording a short-lived hash of every
+	// payload we send and skipping any inbound payload that matches lets
+	// this be caught without needing to know Yandex's exact broadcast
+	// wrapping format, and without touching the wire format the real
+	// backend expects.
+	recentSentMu sync.Mutex
+	recentSent   map[uint32]time.Time
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
@@ -344,6 +363,8 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 			continue
 		}
 
+		t.markSent(packet)
+
 		payload := base64.StdEncoding.EncodeToString(packet)
 		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
@@ -351,6 +372,48 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 			utils.Debugf("[YDOCS] Write error: %v", err)
 		}
 	}
+}
+
+// markSent records that data was just sent, so a later self-echo of it
+// arriving back through handleMessage can be recognized and dropped - see
+// YandexDocsTransport.recentSent's doc comment. Entries expire on their own
+// (checked in wasRecentlySent) rather than needing an explicit size cap: an
+// echo either arrives within a couple of seconds or not at all, so nothing
+// legitimate is lost by letting old entries age out during opportunistic
+// cleanup here.
+func (t *YandexDocsTransport) markSent(data []byte) {
+	h := crc32.ChecksumIEEE(data)
+	now := time.Now()
+
+	t.recentSentMu.Lock()
+	defer t.recentSentMu.Unlock()
+	if t.recentSent == nil {
+		t.recentSent = make(map[uint32]time.Time)
+	}
+	t.recentSent[h] = now
+	if len(t.recentSent) > 512 {
+		cutoff := now.Add(-5 * time.Second)
+		for k, ts := range t.recentSent {
+			if ts.Before(cutoff) {
+				delete(t.recentSent, k)
+			}
+		}
+	}
+}
+
+// wasRecentlySent reports whether data matches something markSent recorded
+// within the last 5 seconds - a real echo of our own traffic always arrives
+// within one round trip to Yandex's servers, far under that window, while an
+// unrelated packet from the peer coincidentally producing the same CRC32 is
+// astronomically unlikely.
+func (t *YandexDocsTransport) wasRecentlySent(data []byte) bool {
+	h := crc32.ChecksumIEEE(data)
+
+	t.recentSentMu.Lock()
+	ts, ok := t.recentSent[h]
+	t.recentSentMu.Unlock()
+
+	return ok && time.Since(ts) < 5*time.Second
 }
 
 func (t *YandexDocsTransport) keepAliveLoop() {
@@ -405,6 +468,15 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		decoded, err := base64.StdEncoding.DecodeString(base64Str)
 		if err != nil {
 			utils.Debugf("[YDOCS] Base64 decode error: %v", err)
+			return
+		}
+
+		// The doc broadcasts every cursor event to every participant,
+		// sender included - without this check our own just-sent packet
+		// comes back here as if the peer had sent it. See recentSent's
+		// doc comment on YandexDocsTransport for why this bit us badly:
+		// it isn't a rare glitch, it's every single packet we send.
+		if t.wasRecentlySent(decoded) {
 			return
 		}
 
