@@ -59,6 +59,9 @@ func TestBuildRemoteCommandIncludesDefaultsAndQuoting(t *testing.T) {
 	if !strings.Contains(cmd, "export RUN_NODE_HERE='n';") {
 		t.Errorf("RUN_NODE_HERE=n must be explicit (not omitted) so it overrides install.sh's own default: %s", cmd)
 	}
+	if !strings.Contains(cmd, "export WEB_PANEL='n';") {
+		t.Errorf("WEB_PANEL='n' must be explicit - this exec has no controlling terminal, so install.sh's own prompt would silently fall through to its own 'y' default and attempt a Bun/SvelteKit build no one asked for: %s", cmd)
+	}
 	if strings.Contains(cmd, "SERVER_IP") {
 		t.Errorf("SERVER_IP is blank in domain mode and should not appear at all: %s", cmd)
 	}

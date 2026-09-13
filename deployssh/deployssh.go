@@ -304,6 +304,17 @@ func buildRemoteCommand(opts DeployOptions) string {
 		"NODE_NAME":     opts.NodeName,
 		"NODE_MAX_KEYS": strconv.Itoa(opts.NodeMaxKeys),
 		"RUN_NODE_HERE": boolToYN(opts.RunNodeHere),
+		// install.sh's WEB_PANEL prompt (the optional SvelteKit+Bun admin
+		// panel) defaults to "y" when left unset - fine for a human at a
+		// keyboard, but this exec has no controlling terminal at all, so
+		// install.sh's own read would fail and silently fall through to
+		// that same default, meaning every app-initiated deploy would
+		// attempt a Bun install and an npm build it never asked for,
+		// slower and with its own new failure surface. Pinned to "n" (the
+		// pre-existing embedded panel, unaffected either way) until this
+		// app has a UI for it - see install.sh's WEB_PANEL for what "y"
+		// would actually set up.
+		"WEB_PANEL": "n",
 	}
 
 	var b strings.Builder
@@ -318,6 +329,7 @@ func buildRemoteCommand(opts DeployOptions) string {
 	for _, key := range []string{
 		"REPO_URL", "GIT_REF", "TLS_MODE", "DOMAIN", "LE_EMAIL", "SERVER_IP",
 		"ADMIN_TOKEN", "DB_PASSWORD", "REGISTER_NODE", "NODE_NAME", "NODE_MAX_KEYS", "RUN_NODE_HERE",
+		"WEB_PANEL",
 	} {
 		v := env[key]
 		if v == "" {
