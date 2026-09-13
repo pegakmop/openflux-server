@@ -48,8 +48,15 @@ func ProtectedDialer() *net.Dialer {
 // nameserver itself here. Order matters: the first one reachable wins.
 // Both are well-known public resolvers chosen for being reachable from
 // networks where this tool is actually used, not tied to any one profile's
-// configured (tunneled) DNSUpstream.
+// configured (tunneled) DNSUpstream. Exported so the gateway can reuse the
+// exact same reachable-directly resolvers when it serves DNS for sites that
+// bypass the tunnel (see gateway.dns.go).
 var bootstrapDNSServers = []string{"77.88.8.8:53", "8.8.8.8:53"}
+
+// BootstrapDNSServers returns a copy of the bootstrap resolver list.
+func BootstrapDNSServers() []string {
+	return append([]string(nil), bootstrapDNSServers...)
+}
 
 // ProtectedResolver forces the pure-Go DNS resolver and routes its lookup
 // socket through the same protection. Go prefers the OS/cgo resolver on

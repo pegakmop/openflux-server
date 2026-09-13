@@ -22,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
+	"universal-bypass-tool/transport"
 	"universal-bypass-tool/tunnel"
 	"universal-bypass-tool/utils"
 )
@@ -52,6 +53,20 @@ const gatewayNIC = tcpip.NICID(1)
 type Server struct {
 	dialer      Dialer
 	dnsUpstream string
+	directDialer *net.Dialer
+
+	// sitePolicy, when enabled (see SitePolicy.Enabled), routes TCP
+	// connections and DNS queries for matching sites around the tunnel -
+	// dialing them straight from the device instead. dnsCache maps resolved
+	// A records back to their hostnames so SNI-less connections can still be
+	// classified by destination IP.
+	sitePolicy *SitePolicy
+	dnsCache   *dnsCache
+	// directResolvers are the resolvers dnsQueryDirect uses for DNS that
+	// must go around the tunnel, first match wins. Populated by default with
+	// the configured upstream plus the transport package's bootstrap
+	// resolvers; tests override it with a local stub.
+	directResolvers []string
 
 	gvisorStack *stack.Stack
 	linkEP      *tunnel.TunnelLinkEndpoint
@@ -61,14 +76,55 @@ type Server struct {
 // NewServer builds a gateway that relays through dialer. dnsUpstream is the
 // host (optionally host:port, defaulting to :53) of the DNS-over-TCP
 // resolver used for intercepted DNS queries; it is dialed through the same
-// Dialer, so resolution goes through the tunnel like everything else.
+// Dialer, so resolution goes through the tunnel like everything else. The
+// site policy is disabled (everything tunnels).
 func NewServer(dialer Dialer, dnsUpstream string) *Server {
+	return NewServerWithPolicy(dialer, dnsUpstream, nil)
+}
+
+// NewServerWithPolicy builds a gateway with the site-level split-tunneling
+// policy. nil works like SiteSplitOff without the per-connection sniffing
+// overhead.
+func NewServerWithPolicy(dialer Dialer, dnsUpstream string, policy *SitePolicy) *Server {
 	if dnsUpstream == "" {
 		dnsUpstream = "77.88.8.8:53"
 	} else if _, _, err := net.SplitHostPort(dnsUpstream); err != nil {
 		dnsUpstream = net.JoinHostPort(dnsUpstream, "53")
 	}
-	return &Server{dialer: dialer, dnsUpstream: dnsUpstream}
+	return &Server{
+		dialer:          dialer,
+		dnsUpstream:     dnsUpstream,
+		directDialer:    transport.ProtectedDialer(),
+		sitePolicy:      policy,
+		dnsCache:        newDNSCache(),
+		directResolvers: defaultDirectResolvers(dnsUpstream),
+	}
+}
+
+// defaultDirectResolvers builds the resolver list for DNS queries that must
+// bypass the tunnel: the profile's own upstream first (a LAN DNS resolves
+// local/intranet sites the tunnel's configured resolver wouldn't), then the
+// well-known public resolvers the transport itself uses to bootstrap, so a
+// bypassed query keeps working even if the upstream only answers on the
+// tunneled side.
+func defaultDirectResolvers(dnsUpstream string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(host string) {
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			host = net.JoinHostPort(host, "53")
+		}
+		if _, dup := seen[host]; dup {
+			return
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	add(dnsUpstream)
+	for _, s := range transport.BootstrapDNSServers() {
+		add(s)
+	}
+	return out
 }
 
 // Start wires up the gvisor stack and begins pumping packets: tunReader is
@@ -173,9 +229,50 @@ func (s *Server) handleTCP(r *tcp.ForwarderRequest) {
 func (s *Server) relayTCP(localConn net.Conn, dest string) {
 	defer localConn.Close()
 
+	body := localConn
+	if s.sitePolicy != nil && s.sitePolicy.Enabled() {
+		var peeked []byte
+		peeked, body = sniffClientHello(localConn)
+		if s.shouldBypassConnection(peeked, dest) {
+			utils.Debugf("[GATEWAY] site split: %s bypasses the tunnel", s.connectionLabel(peeked, dest))
+			s.relayDirect(body, dest)
+			return
+		}
+	}
+
 	remoteConn, err := s.dialer.DialTCP(dest)
 	if err != nil {
 		utils.Debugf("[GATEWAY] dial %s failed: %v", dest, err)
+		return
+	}
+	defer remoteConn.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		defer remoteConn.Close()
+		io.Copy(remoteConn, body)
+	}()
+	go func() {
+		defer wg.Done()
+		defer localConn.Close()
+		io.Copy(localConn, remoteConn)
+	}()
+
+	wg.Wait()
+}
+
+// relayDirect bridges a connection straight out of the device, bypassing the
+// tunnel - the "site split" path for selected domains. It dials the
+// destination IP with the transport's protected dialer so the socket is
+// exempted from the Android VPN and can't be re-captured by the very tunnel
+// it's supposed to go around.
+func (s *Server) relayDirect(localConn net.Conn, dest string) {
+	remoteConn, err := s.directDialer.Dial("tcp", dest)
+	if err != nil {
+		utils.Debugf("[GATEWAY] direct dial %s failed: %v", dest, err)
 		return
 	}
 	defer remoteConn.Close()
@@ -195,6 +292,41 @@ func (s *Server) relayTCP(localConn net.Conn, dest string) {
 	}()
 
 	wg.Wait()
+}
+
+// shouldBypassConnection decides whether a fresh TCP connection goes around
+// the tunnel, gathering every identity the policy can work with: the TLS SNI
+// sniffed off the connection's head, the destination IP itself (matches IP
+// rules), and the DNS cache's reverse mapping of that IP (covers SNI-less
+// traffic that resolved through the gateway). Behaviour with no signal at
+// all defers to the policy mode's default (tunnel for EXCLUDE, direct for
+// INCLUDE). Ambiguity is resolved toward the tunnel inside the policy.
+func (s *Server) shouldBypassConnection(peeked []byte, dest string) bool {
+	var candidates []string
+	if domain := sniServerName(peeked); domain != "" {
+		candidates = append(candidates, domain)
+	}
+	host, _, err := net.SplitHostPort(dest)
+	if err == nil && s.dnsCache != nil {
+		candidates = append(candidates, s.dnsCache.lookup(host)...)
+	}
+	return s.sitePolicy.ShouldBypassDest(host, candidates)
+}
+
+// connectionLabel names a connection for log lines: the SNI if it was
+// sniffed, otherwise whatever the DNS cache knows, otherwise the raw dest.
+func (s *Server) connectionLabel(peeked []byte, dest string) string {
+	if domain := sniServerName(peeked); domain != "" {
+		return domain
+	}
+	host, _, err := net.SplitHostPort(dest)
+	if err != nil || s.dnsCache == nil {
+		return dest
+	}
+	if domains := s.dnsCache.lookup(host); len(domains) > 0 {
+		return domains[0]
+	}
+	return dest
 }
 
 // handleUDP accepts every UDP flow: port 53 (DNS) gets the request/response

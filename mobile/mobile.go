@@ -88,6 +88,15 @@ type Config struct {
 	// VpnService.Builder itself before opening the TUN fd.
 	MTU         int    `json:"mtu"`
 	DNSUpstream string `json:"dns_upstream"`
+
+	// SiteSplitMode is the per-site split-tunneling mode: "" or "off"
+	// (everything through the tunnel), "exclude" (everything except the
+	// sites below), or "include" (only the sites below). SiteSplitSites is
+	// the list of domains - accepting suffix wildcards like "*.ru" and
+	// literal IPs too - those rules apply to. See gateway.SitePolicy -
+	// listeners don't set it; only the client's StartTunnel consumes it.
+	SiteSplitMode  string   `json:"site_split_mode,omitempty"`
+	SiteSplitSites []string `json:"site_split_sites,omitempty"`
 }
 
 type session struct {
@@ -154,7 +163,7 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 		return fail(cb, fmt.Errorf("invalid tun file descriptor: %d", tunFd))
 	}
 
-	gw := gateway.NewServer(tun, cfg.DNSUpstream)
+	gw := gateway.NewServerWithPolicy(tun, cfg.DNSUpstream, sitePolicy(cfg))
 	if err := gw.Start(tunFile, tunFile); err != nil {
 		trans.Stop()
 		tun.Close()
@@ -224,6 +233,13 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 	default:
 		return nil, fmt.Errorf("unsupported transport %q for this client", t)
 	}
+}
+
+// sitePolicy turns the client config's site-split fields into the gateway's
+// route policy. An empty/unset mode or empty site list yields a disabled
+// policy (identical to today's always-tunnel behavior).
+func sitePolicy(cfg Config) *gateway.SitePolicy {
+	return gateway.NewSitePolicy(gateway.ParseSiteSplitMode(cfg.SiteSplitMode), cfg.SiteSplitSites)
 }
 
 func pumpStats(s *session, cb Callback) {
