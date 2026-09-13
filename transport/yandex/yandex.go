@@ -1,7 +1,9 @@
 package yandex
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -21,6 +23,32 @@ import (
 
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
+)
+
+// Sending one WebSocket frame per queued packet was cheap enough for a
+// single mobile client but scales badly on an exit node juggling many keys
+// at once - every packet pays its own base64 encode, JSON string format,
+// and WriteMessage syscall regardless of size, and the OS/GC overhead of
+// that per-message cost is what actually dominates at higher concurrent
+// packet rates, not the bytes themselves. writerLoop below batches several
+// queued packets into one length-prefixed blob (the same framing Volga
+// already uses - see decodeBatch in volga.go, reused here as-is) before
+// base64-encoding and sending it as a single "cursor" message, the same way
+// Volga batches multiple packets into one relay HTTP POST.
+//
+// batchMarker prefixes a batched payload's first byte so a peer can tell it
+// apart from a lone compressed packet from a not-yet-updated build: the
+// compression layer (transport/compressor.go) only ever emits 0x00
+// (stored) or 0x1F (LZ4) as its own first byte, so 0xFE can never collide
+// with a real single-packet payload - mixing an updated and a
+// not-yet-updated peer during a rollout degrades to today's one-packet-per-
+// message behavior instead of misparsing either side's data.
+const batchMarker = 0xFE
+
+const (
+	ydocsBatchSize     = 20
+	ydocsBatchTimeout  = 5 * time.Millisecond
+	ydocsBatchMaxBytes = 4 * 1024 * 1024
 )
 
 // defaultPingWindow is used when the server's engine.io "open" packet can't
@@ -381,6 +409,18 @@ func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token strin
 }
 
 func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
+	batch := make([][]byte, 0, ydocsBatchSize)
+	totalBytes := 0
+
+	flush := func(session *DocSession) {
+		if len(batch) == 0 {
+			return
+		}
+		t.sendBatch(session, batch)
+		batch = batch[:0]
+		totalBytes = 0
+	}
+
 	for t.IsRunning() {
 		// t.session is never nil'd on disconnect (see connectToDoc) - it
 		// keeps pointing at the old, now-dead session until a new one
@@ -391,7 +431,8 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 		// away on the write to that dead connection anyway, every single
 		// time. Waiting for IsConnected() before ever touching the channel
 		// is what actually keeps queued data queued until a live session
-		// exists to drain it into.
+		// exists to drain it into - batch (if anything is held) waits here
+		// right along with it, for the same reason.
 		t.Mu.RLock()
 		session := t.session
 		connected := t.IsConnected()
@@ -401,31 +442,55 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 			continue
 		}
 
-		var packet []byte
 		select {
-		case packet = <-queue:
-		case <-time.After(200 * time.Millisecond):
-			// Nothing to send; loop back around just to re-check IsRunning.
-			continue
+		case packet := <-queue:
+			batch = append(batch, packet)
+			totalBytes += len(packet)
+			if len(batch) >= ydocsBatchSize || totalBytes >= ydocsBatchMaxBytes {
+				flush(session)
+			}
+		case <-time.After(ydocsBatchTimeout):
+			// Whatever's accumulated so far (even a single packet) goes
+			// out now rather than waiting for a full batch - low traffic
+			// must not turn into added latency.
+			flush(session)
 		}
+	}
+}
 
-		t.markSent(packet)
-		if utils.IsVerbose() {
-			// packet is whatever the caller handed to Send() - when wrapped
-			// in transport.CompressedTransport (the normal case), that's
-			// already-compressed bytes, not a raw IP packet, so parsing it
-			// as one here would print convincing-looking nonsense (garbage
-			// addresses/protocol numbers) instead of failing loudly. Byte
-			// count is the only thing safe to claim about it at this layer.
-			utils.Debugf("[YDOCS] -> %d bytes\n", len(packet))
-		}
+// sendBatch frames batch as one length-prefixed blob (batchMarker + Volga's
+// own [len,data]... encoding, reused verbatim via decodeBatch on the
+// receiving end), base64s it, and writes it as a single "cursor" message -
+// one WriteMessage syscall and one self-echo hash for however many packets
+// batch holds, instead of one of each per packet.
+func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
+	var blob bytes.Buffer
+	blob.WriteByte(batchMarker)
+	var lenBuf [2]byte
+	for _, p := range batch {
+		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(p)))
+		blob.Write(lenBuf[:])
+		blob.Write(p)
+	}
+	framed := blob.Bytes()
 
-		payload := base64.StdEncoding.EncodeToString(packet)
-		msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+	t.markSent(framed)
+	if utils.IsVerbose() {
+		// framed is whatever the caller handed to Send() for each packet in
+		// batch, length-prefixed and concatenated - when wrapped in
+		// transport.CompressedTransport (the normal case), that's
+		// already-compressed bytes, not raw IP packets, so parsing it here
+		// would print convincing-looking nonsense instead of failing
+		// loudly. Byte/packet counts are the only things safe to claim
+		// about it at this layer.
+		utils.Debugf("[YDOCS] -> %d bytes (%d packets)\n", len(framed), len(batch))
+	}
 
-		if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-			utils.Debugf("[YDOCS] Write error: %v", err)
-		}
+	payload := base64.StdEncoding.EncodeToString(framed)
+	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+
+	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+		utils.Debugf("[YDOCS] Write error: %v", err)
 	}
 }
 
@@ -545,6 +610,18 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		}
 
 		t.RecordReceive(len(decoded))
+
+		// batchMarker (see sendBatch) flags decoded as several
+		// length-prefixed packets rather than one lone payload - the
+		// framing a not-yet-updated peer's packets never carry (compress()
+		// only ever emits 0x00/0x1F as its own first byte), so this stays
+		// correct talking to either version of this transport.
+		if len(decoded) > 0 && decoded[0] == batchMarker {
+			for _, pkt := range decodeBatch(decoded[1:]) {
+				t.CallReceive(pkt)
+			}
+			return
+		}
 		t.CallReceive(decoded)
 	}
 }

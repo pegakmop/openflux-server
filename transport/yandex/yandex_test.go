@@ -1,7 +1,9 @@
 package yandex
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -102,6 +104,141 @@ func TestHandleMessageDeliversRealPeerData(t *testing.T) {
 
 func b64(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
+}
+
+// --- batching -------------------------------------------------------------
+
+func buildBatch(t *testing.T, packets ...[]byte) []byte {
+	t.Helper()
+	var blob bytes.Buffer
+	blob.WriteByte(batchMarker)
+	var lenBuf [2]byte
+	for _, p := range packets {
+		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(p)))
+		blob.Write(lenBuf[:])
+		blob.Write(p)
+	}
+	return blob.Bytes()
+}
+
+// TestHandleMessageUnbatchesMultiPacketPayload guards the new wire format
+// writerLoop/sendBatch produce: several packets length-prefixed together
+// behind a leading batchMarker byte, so one WS message can carry many
+// packets instead of exactly one.
+func TestHandleMessageUnbatchesMultiPacketPayload(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	var received [][]byte
+	tr.Receive(func(data []byte) { received = append(received, append([]byte(nil), data...)) })
+
+	pkt1 := []byte("first packet")
+	pkt2 := []byte("second, a bit longer packet")
+	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(buildBatch(t, pkt1, pkt2)) + `"}]`
+	tr.handleMessage(nil, []byte(msg))
+
+	if len(received) != 2 || string(received[0]) != string(pkt1) || string(received[1]) != string(pkt2) {
+		t.Fatalf("received = %v, want [%q %q]", received, pkt1, pkt2)
+	}
+}
+
+// TestHandleMessageStillHandlesUnbatchedLegacyPayload guards backward
+// compatibility with a peer that hasn't picked up batching yet (or a
+// still-running exit node mid-redeploy): a payload with no batchMarker
+// byte - exactly what compress() always produced before batching existed -
+// must still be delivered as a single packet, unsplit.
+func TestHandleMessageStillHandlesUnbatchedLegacyPayload(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	var received [][]byte
+	tr.Receive(func(data []byte) { received = append(received, data) })
+
+	legacy := []byte{0x00, 'h', 'i'} // compress()'s own "stored" marker, not batchMarker
+	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(legacy) + `"}]`
+	tr.handleMessage(nil, []byte(msg))
+
+	if len(received) != 1 || string(received[0]) != string(legacy) {
+		t.Fatalf("received = %v, want [%q] delivered whole, unsplit", received, legacy)
+	}
+}
+
+// TestHandleMessageDropsOwnEchoedBatch is TestHandleMessageDropsOwnEcho's
+// batching-era counterpart: self-echo dedup has to hash the whole framed
+// batch sendBatch actually put on the wire, not the individual packets
+// inside it.
+func TestHandleMessageDropsOwnEchoedBatch(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	batch := buildBatch(t, []byte("packet a"), []byte("packet b"))
+	tr.markSent(batch)
+
+	var received [][]byte
+	tr.Receive(func(data []byte) { received = append(received, data) })
+
+	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(batch) + `"}]`
+	tr.handleMessage(nil, []byte(msg))
+
+	if len(received) != 0 {
+		t.Fatalf("handleMessage delivered our own echoed batch: %v", received)
+	}
+}
+
+// TestWriterLoopBatchesMultiplePacketsIntoOneMessage guards the actual
+// throughput win batching exists for: several packets queued in quick
+// succession must go out as one WS message, not one per packet.
+func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
+	received := make(chan []byte, 1)
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		received <- msg
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	if err := tr.BaseTransport.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tr.SetConnected(true)
+	queue := make(chan []byte, 10)
+	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
+
+	go tr.writerLoop(queue)
+
+	want := [][]byte{[]byte("aaa"), []byte("bb"), []byte("ccccc")}
+	for _, p := range want {
+		queue <- p
+	}
+
+	select {
+	case msg := <-received:
+		base64Str := tr.extractBase64String(string(msg))
+		if base64Str == "" {
+			t.Fatalf("could not extract a base64 payload from %q", msg)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(base64Str)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(decoded) == 0 || decoded[0] != batchMarker {
+			t.Fatalf("expected a batchMarker-prefixed payload, got %v", decoded)
+		}
+		got := decodeBatch(decoded[1:])
+		if len(got) != len(want) {
+			t.Fatalf("got %d packets, want %d: %v", len(got), len(want), got)
+		}
+		for i := range want {
+			if string(got[i]) != string(want[i]) {
+				t.Errorf("packet[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server never received the batched message")
+	}
 }
 
 // --- normalizeDocURL -------------------------------------------------
