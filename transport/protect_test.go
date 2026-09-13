@@ -94,6 +94,51 @@ func TestProtectedResolverIgnoresRequestedAddress(t *testing.T) {
 	}
 }
 
+// TestSetBootstrapDNSServersReplacesNotAppends guards the documented
+// "force, don't fall back" behavior: a caller supplying their own resolver
+// already knows the defaults don't work for them, so they must not still be
+// tried.
+func TestSetBootstrapDNSServersReplacesNotAppends(t *testing.T) {
+	t.Cleanup(func() { SetBootstrapDNSServers(nil) })
+
+	SetBootstrapDNSServers([]string{"192.0.2.1:53"})
+	got := BootstrapDNSServers()
+	if len(got) != 1 || got[0] != "192.0.2.1:53" {
+		t.Fatalf("BootstrapDNSServers() = %v, want exactly [192.0.2.1:53]", got)
+	}
+}
+
+// TestSetBootstrapDNSServersAppendsDefaultPort mirrors the same host:port
+// normalization every other DNS-address input in this codebase gets - a
+// bare IP typed into a profile setting shouldn't need ":53" spelled out.
+func TestSetBootstrapDNSServersAppendsDefaultPort(t *testing.T) {
+	t.Cleanup(func() { SetBootstrapDNSServers(nil) })
+
+	SetBootstrapDNSServers([]string{"192.0.2.1"})
+	got := BootstrapDNSServers()
+	if len(got) != 1 || got[0] != "192.0.2.1:53" {
+		t.Fatalf("BootstrapDNSServers() = %v, want exactly [192.0.2.1:53]", got)
+	}
+}
+
+// TestSetBootstrapDNSServersEmptyRestoresDefaults guards StopTunnel's own
+// cleanup call: a profile that forced a resolver must not leak that choice
+// into the next profile's session.
+func TestSetBootstrapDNSServersEmptyRestoresDefaults(t *testing.T) {
+	SetBootstrapDNSServers([]string{"192.0.2.1:53"})
+	SetBootstrapDNSServers(nil)
+
+	got := BootstrapDNSServers()
+	if len(got) != len(defaultBootstrapDNSServers) {
+		t.Fatalf("BootstrapDNSServers() = %v, want the defaults %v", got, defaultBootstrapDNSServers)
+	}
+	for i, want := range defaultBootstrapDNSServers {
+		if got[i] != want {
+			t.Errorf("BootstrapDNSServers()[%d] = %q, want %q", i, got[i], want)
+		}
+	}
+}
+
 func TestProtectedDialerNoProtectorIsANoop(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -12,9 +12,9 @@ func buildClientHello(sni string, withSNI bool) []byte {
 	hello = append(hello, 0x03, 0x03) // legacy_version
 	random := make([]byte, 32)
 	hello = append(hello, random...)
-	hello = append(hello, 0x00)                // no session id
+	hello = append(hello, 0x00)                               // no session id
 	hello = append(hello, 0x00, 0x04, 0x13, 0x01, 0x13, 0x02) // two ciphers
-	hello = append(hello, 0x01, 0x00)          // one compression method (null)
+	hello = append(hello, 0x01, 0x00)                         // one compression method (null)
 
 	var exts []byte
 	if withSNI {

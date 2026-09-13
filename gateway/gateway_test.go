@@ -34,8 +34,11 @@ func TestNewServerNormalizesDNSUpstream(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := NewServer(fakeDialer{}, c.input)
-			if s.dnsUpstream != c.want {
-				t.Errorf("dnsUpstream = %q, want %q", s.dnsUpstream, c.want)
+			if s.dnsUpstreamCfg.kind != dnsUpstreamPlain {
+				t.Fatalf("kind = %v, want dnsUpstreamPlain", s.dnsUpstreamCfg.kind)
+			}
+			if s.dnsUpstreamCfg.addr != c.want {
+				t.Errorf("addr = %q, want %q", s.dnsUpstreamCfg.addr, c.want)
 			}
 		})
 	}

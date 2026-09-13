@@ -48,22 +48,9 @@ func (s *Server) relayDNS(conn net.Conn) {
 		}
 	}
 
-	upstream, err := s.dialer.DialTCP(s.dnsUpstream)
+	reply, err := s.queryUpstream(query)
 	if err != nil {
-		utils.Debugf("[GATEWAY] dns upstream dial failed: %v", err)
-		return
-	}
-	defer upstream.Close()
-	upstream.SetDeadline(time.Now().Add(dnsQueryTimeout))
-
-	if err := writeDNSOverTCP(upstream, query); err != nil {
-		utils.Debugf("[GATEWAY] dns upstream write failed: %v", err)
-		return
-	}
-
-	reply, err := readDNSOverTCP(upstream)
-	if err != nil {
-		utils.Debugf("[GATEWAY] dns upstream read failed: %v", err)
+		utils.Debugf("[GATEWAY] dns upstream query failed: %v", err)
 		return
 	}
 

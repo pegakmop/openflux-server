@@ -128,10 +128,10 @@ func dnsQuestionName(msg []byte) (string, bool) {
 // dnsTypeA = 1 (IPv4), dnsClassIN = 1, dnsMinTTLEntry/dnsMaxTTLEntry bound
 // how long a reverse IP->domain mapping may be remembered.
 const (
-	dnsTypeA        = 1
-	dnsClassIN      = 1
-	dnsMinTTLEntry  = 10
-	dnsMaxTTLEntry  = 24 * 60 * 60
+	dnsTypeA       = 1
+	dnsClassIN     = 1
+	dnsMinTTLEntry = 10
+	dnsMaxTTLEntry = 24 * 60 * 60
 )
 
 // dnsARecord holds one answer's owner name, its A IP and the record TTL.

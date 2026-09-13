@@ -42,20 +42,60 @@ func ProtectedDialer() *net.Dialer {
 	}
 }
 
-// bootstrapDNSServers are queried directly (never through the tunnel, via
-// ProtectedDialer) to resolve the transport's own hostnames - see
-// ProtectedResolver's doc comment for why Go can't be left to pick a
+// defaultBootstrapDNSServers are queried directly (never through the
+// tunnel, via ProtectedDialer) to resolve the transport's own hostnames -
+// see ProtectedResolver's doc comment for why Go can't be left to pick a
 // nameserver itself here. Order matters: the first one reachable wins.
 // Both are well-known public resolvers chosen for being reachable from
 // networks where this tool is actually used, not tied to any one profile's
-// configured (tunneled) DNSUpstream. Exported so the gateway can reuse the
-// exact same reachable-directly resolvers when it serves DNS for sites that
-// bypass the tunnel (see gateway.dns.go).
-var bootstrapDNSServers = []string{"77.88.8.8:53", "8.8.8.8:53"}
+// configured (tunneled) DNSUpstream.
+var defaultBootstrapDNSServers = []string{"77.88.8.8:53", "8.8.8.8:53"}
 
-// BootstrapDNSServers returns a copy of the bootstrap resolver list.
+// bootstrapDNSServers is what ProtectedResolver actually queries - starts
+// out as defaultBootstrapDNSServers, but SetBootstrapDNSServers can replace
+// it for a session (see that function's doc comment).
+var bootstrapDNSServers = append([]string(nil), defaultBootstrapDNSServers...)
+
+// BootstrapDNSServers returns a copy of the resolver list currently in
+// effect. Exported so the gateway can reuse the exact same
+// reachable-directly resolvers when it serves DNS for sites that bypass the
+// tunnel (see gateway.dns.go) - whatever SetBootstrapDNSServers last set
+// applies there too, for the same reason: if the caller had to force a
+// specific resolver to get anywhere on this network, a site bypassing the
+// tunnel needs that same override just as much as the transport's own
+// bootstrap lookups do.
 func BootstrapDNSServers() []string {
 	return append([]string(nil), bootstrapDNSServers...)
+}
+
+// SetBootstrapDNSServers forcibly replaces the resolver(s) ProtectedResolver
+// queries to resolve the transport's own hostnames (docs.yandex.ru and
+// friends) before the tunnel exists to carry anything else - normally two
+// fixed public resolvers (see defaultBootstrapDNSServers), which is fine
+// until the network a device is actually on can't reach them at all (a
+// carrier that blackholes third-party resolvers, a captive network that
+// only routes to its own DNS) while a different, locally-reachable server
+// works fine. A non-empty list here REPLACES the defaults outright rather
+// than being tried alongside them - the caller already knows the defaults
+// don't work for them, and falling back to a server already established as
+// unreachable would just re-add the delay this exists to avoid. An empty
+// list restores the defaults. Not concurrency-safe against a lookup already
+// in flight, same as SetProtector - call this before starting a tunnel
+// (and once more, empty, after stopping it) rather than while one is
+// running.
+func SetBootstrapDNSServers(servers []string) {
+	if len(servers) == 0 {
+		bootstrapDNSServers = append([]string(nil), defaultBootstrapDNSServers...)
+		return
+	}
+	normalized := make([]string, len(servers))
+	for i, s := range servers {
+		if _, _, err := net.SplitHostPort(s); err != nil {
+			s = net.JoinHostPort(s, "53")
+		}
+		normalized[i] = s
+	}
+	bootstrapDNSServers = normalized
 }
 
 // ProtectedResolver forces the pure-Go DNS resolver and routes its lookup

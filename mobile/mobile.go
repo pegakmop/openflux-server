@@ -97,6 +97,16 @@ type Config struct {
 	// listeners don't set it; only the client's StartTunnel consumes it.
 	SiteSplitMode  string   `json:"site_split_mode,omitempty"`
 	SiteSplitSites []string `json:"site_split_sites,omitempty"`
+
+	// ForceBootstrapDNS, when set, replaces the fixed public resolvers
+	// StartTunnel would otherwise use to resolve the transport's own
+	// hostnames (docs.yandex.ru and friends) before the tunnel exists to
+	// carry anything else - see transport.SetBootstrapDNSServers. Empty
+	// leaves the defaults in place. This is about getting the very first
+	// connection off the ground on a network whose own resolver can't reach
+	// (or refuses to answer for) those two public ones; it has no bearing on
+	// DNSUpstream above, which is queried only once the tunnel is already up.
+	ForceBootstrapDNS string `json:"force_bootstrap_dns,omitempty"`
 }
 
 type session struct {
@@ -133,6 +143,9 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	if protector != nil {
 		transport.SetProtector(protector.Protect)
 		net.DefaultResolver = transport.ProtectedResolver()
+		if cfg.ForceBootstrapDNS != "" {
+			transport.SetBootstrapDNSServers([]string{cfg.ForceBootstrapDNS})
+		}
 	}
 
 	notify(cb, "connecting")
@@ -188,6 +201,7 @@ func StopTunnel() error {
 	mu.Unlock()
 
 	transport.SetProtector(nil)
+	transport.SetBootstrapDNSServers(nil)
 	net.DefaultResolver = originalResolver
 
 	if s == nil {

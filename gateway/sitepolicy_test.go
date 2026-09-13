@@ -71,13 +71,13 @@ func TestSitePolicyInclude(t *testing.T) {
 		domain string
 		want   bool
 	}{
-		{"youtube.com", false},           // tunneled
-		{"www.youtube.com", false},       // subdomain tunneled
-		{"wikipedia.org", false},         // tunneled
-		{"en.wikipedia.org", false},      // tunneled
-		{"example.com", true},            // not listed -> direct
-		{"youtube.com.evil.com", true},   // suffix only
-		{"", true},                       // unknown -> direct is the include default
+		{"youtube.com", false},         // tunneled
+		{"www.youtube.com", false},     // subdomain tunneled
+		{"wikipedia.org", false},       // tunneled
+		{"en.wikipedia.org", false},    // tunneled
+		{"example.com", true},          // not listed -> direct
+		{"youtube.com.evil.com", true}, // suffix only
+		{"", true},                     // unknown -> direct is the include default
 	}
 	for _, c := range cases {
 		if got := p.ShouldBypass(c.domain); got != c.want {
@@ -126,7 +126,7 @@ func TestSitePolicySuffixWildcard(t *testing.T) {
 		{"yandex.ru", true},
 		{"www.yandex.ru", true},
 		{"deep.sub.example.ru", true},
-		{"ru", true},           // the bare label is matched too, same as *.example.com
+		{"ru", true}, // the bare label is matched too, same as *.example.com
 		{"example.com", false},
 		{"ru.evil.com", false}, // suffix only, not ".ru"
 		{"example.co.uk", true},

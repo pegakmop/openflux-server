@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -51,9 +52,18 @@ const gatewayNIC = tcpip.NICID(1)
 // (this stack only registers ipv4) is left unhandled, which fails closed
 // rather than leaking outside the tunnel.
 type Server struct {
-	dialer      Dialer
-	dnsUpstream string
-	directDialer *net.Dialer
+	dialer Dialer
+	// dnsUpstreamCfg is the constructor's dnsUpstream argument, parsed once
+	// - see parseDNSUpstream for the tls://.../https://... forms
+	// relayDNS's queryUpstream understands on top of a plain host:port.
+	dnsUpstreamCfg dnsUpstreamConfig
+	// dnsUpstreamTLSConfig is queryDoT/queryDoH's TLS config (nil, meaning
+	// "use the plain path", unless dnsUpstreamCfg is DoT/DoH). A field
+	// rather than built inline so a test can substitute one with
+	// InsecureSkipVerify for a local test server instead of needing a
+	// certificate the system trust store actually recognizes.
+	dnsUpstreamTLSConfig *tls.Config
+	directDialer         *net.Dialer
 
 	// sitePolicy, when enabled (see SitePolicy.Enabled), routes TCP
 	// connections and DNS queries for matching sites around the tunnel -
@@ -86,18 +96,15 @@ func NewServer(dialer Dialer, dnsUpstream string) *Server {
 // policy. nil works like SiteSplitOff without the per-connection sniffing
 // overhead.
 func NewServerWithPolicy(dialer Dialer, dnsUpstream string, policy *SitePolicy) *Server {
-	if dnsUpstream == "" {
-		dnsUpstream = "77.88.8.8:53"
-	} else if _, _, err := net.SplitHostPort(dnsUpstream); err != nil {
-		dnsUpstream = net.JoinHostPort(dnsUpstream, "53")
-	}
+	cfg := parseDNSUpstream(dnsUpstream)
 	return &Server{
-		dialer:          dialer,
-		dnsUpstream:     dnsUpstream,
-		directDialer:    transport.ProtectedDialer(),
-		sitePolicy:      policy,
-		dnsCache:        newDNSCache(),
-		directResolvers: defaultDirectResolvers(dnsUpstream),
+		dialer:               dialer,
+		dnsUpstreamCfg:       cfg,
+		dnsUpstreamTLSConfig: &tls.Config{ServerName: cfg.host},
+		directDialer:         transport.ProtectedDialer(),
+		sitePolicy:           policy,
+		dnsCache:             newDNSCache(),
+		directResolvers:      defaultDirectResolvers(cfg),
 	}
 }
 
@@ -106,8 +113,11 @@ func NewServerWithPolicy(dialer Dialer, dnsUpstream string, policy *SitePolicy) 
 // local/intranet sites the tunnel's configured resolver wouldn't), then the
 // well-known public resolvers the transport itself uses to bootstrap, so a
 // bypassed query keeps working even if the upstream only answers on the
-// tunneled side.
-func defaultDirectResolvers(dnsUpstream string) []string {
+// tunneled side. dnsQueryDirect only ever speaks plain UDP/TCP:53 (see its
+// own doc comment - it's for sites that go around the tunnel entirely, not
+// through it), so a DoT/DoH upstream contributes nothing usable here and is
+// skipped in favor of the plain bootstrap resolvers alone.
+func defaultDirectResolvers(upstream dnsUpstreamConfig) []string {
 	var out []string
 	seen := make(map[string]struct{})
 	add := func(host string) {
@@ -120,7 +130,9 @@ func defaultDirectResolvers(dnsUpstream string) []string {
 		seen[host] = struct{}{}
 		out = append(out, host)
 	}
-	add(dnsUpstream)
+	if upstream.kind == dnsUpstreamPlain {
+		add(upstream.addr)
+	}
 	for _, s := range transport.BootstrapDNSServers() {
 		add(s)
 	}
