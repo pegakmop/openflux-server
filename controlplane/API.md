@@ -94,6 +94,7 @@ capacity.
     "Name": "node-eu-1",
     "MaxKeys": 500,
     "Status": "active",
+    "ActiveKeys": 12,
     "LastHeartbeatAt": "2026-09-11T10:00:00Z",
     "CreatedAt": "2026-09-01T12:00:00Z"
   }
@@ -111,6 +112,74 @@ Invalidates the node's current token immediately and issues a new one.
 {"token": "of_node_..."}
 ```
 `404` if `{id}` doesn't exist.
+
+## Admin: monitoring
+
+Dashboards consume these; every one is admin-authenticated like the rest of
+`/v1/admin/*`.
+
+### `GET /v1/admin/system`
+
+Host metrics of the machine the controlplane runs on, read fresh from `/proc`
+on every call (CPU percent is sampled over a ~150 ms window).
+
+```json
+// 200 response
+{
+  "hostname": "vps-1",
+  "num_cpu": 4,
+  "load1": 0.12,
+  "load5": 0.08,
+  "load15": 0.05,
+  "uptime_sec": 2592000,
+  "cpu_percent": 3.1,
+  "mem_total": 8589934592,
+  "mem_used": 524288000,
+  "swap_total": 0,
+  "swap_used": 0,
+  "disk_total": 107374182400,
+  "disk_used": 30064771072,
+  "process_cpu_percent": 0.4
+}
+```
+
+All byte counts are plain integers (bytes), loads and percentages are floats.
+
+### `GET /v1/admin/stats/summary`
+
+One object for the dashboard's stat cards (lifetime + today totals, key
+counts, node liveness).
+
+```json
+// 200 response
+{
+  "total_bytes_sent": 2147483648,
+  "total_bytes_received": 4294967296,
+  "today_bytes_sent": 1048576,
+  "today_bytes_received": 2097152,
+  "total_keys": 150,
+  "enabled_keys": 121,
+  "over_quota_keys": 4,
+  "expired_keys": 9,
+  "total_nodes": 2,
+  "online_nodes": 1
+}
+```
+
+### `GET /v1/admin/stats/usage` — fleet-wide traffic by day
+
+Query param `?days=<n>` bounds how many trailing days come back (`1..365`,
+default `30`).
+
+```json
+// 200 response — oldest day first, trailing zero days are skipped
+[
+  {"day": "2026-09-12", "bytes_sent": 1048576, "bytes_received": 2097152, "active_keys": 42},
+  {"day": "2026-09-13", "bytes_sent": 524288, "bytes_received": 1048576, "active_keys": 40}
+]
+```
+
+`active_keys` is the count of distinct keys that moved any bytes that day.
 
 ## Admin: keys
 
@@ -210,6 +279,11 @@ usage stats) is untouched.
 `deep_link` follows the same rule as key creation (present only with `CONTROLPLANE_PUBLIC_URL`
 configured), with the key's current `doc_url`/`transport` embedded the same way. `404` if `{id}`
 doesn't exist.
+
+### `GET /v1/admin/keys/{id}/usage` — traffic for one key by day
+
+Same shape and `?days=` rules as the fleet-wide `stats/usage` above, scoped
+to a single key. A deleted key yields an empty array (`[]`), not a `404`.
 
 ## Admin: ingest tokens
 
@@ -360,7 +434,7 @@ keys a client hasn't resolved yet.
 distinguish "wrong token" from "revoked token" by status code alone).
 `doc_url`/`transport` are only present when `status` is `active`.
 
-## Admin web panel
+## Admin web panels
 
 ### `GET /admin/` or `GET /admin/index.html`
 
@@ -372,4 +446,14 @@ the admin token in its own login screen and stores it in the browser's
 this API: a "Keys" tab (create/list/enable/disable/delete keys) and a
 "Settings" tab showing the one exit node this deployment registered
 (status, heartbeat, rotate its token) plus ingest-token management — all
-in Russian, nothing more.
+in Russian, nothing more. This is the fallback that ships inside the Go
+binary and needs no extra process.
+
+There is also a full dashboard built with SvelteKit (`controlplane/web`) —
+an optional second deployment served by Bun behind the same `/admin/` URL,
+covering every admin endpoint above (dashboard stat cards, traffic chart,
+server load, QR deep links on key creation, node/key/ingest management,
+RU/EN, dark theme). Configure the recommended Nginx split
+`/admin/*` → Bun (panel), `/v1/*` → Go (controlplane); for http-mode
+without Nginx, `bun server.js` can proxy `/v1/*` to Go itself. See
+[controlplane/web/README.md](web/README.md).

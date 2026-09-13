@@ -1,0 +1,210 @@
+@import 'tailwindcss';
+
+/* The theme is driven by a [data-theme] attribute on <html>, not the OS
+ * prefers-color-scheme media query alone, so the toggle can override it and
+ * it survives a reload. The `dark:` variant is bound to that attribute. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* --- palette ------------------------------------------------------------- */
+/* Raw tokens flip on [data-theme]; utilities below reference them via
+ * `@theme inline` so Tailwind emits `background-color: var(--of-*)`, and
+ * each element resolves the var against the nearest overriding element. */
+:root {
+	--of-bg: #0b0f15;
+	--of-surface: #141a24;
+	--of-surface-2: #1a2231;
+	--of-raise: #1a2231;
+	--of-line: #223047;
+	--of-line-strong: #2c3d5a;
+	--of-ink: #e7ebf3;
+	--of-muted: #8a95a8;
+	--of-accent: #5b8def;
+	--of-accent-strong: #7ba2f5;
+	--of-accent-ink: #071224;
+	--of-ok: #38d59a;
+	--of-warn: #f0b429;
+	--of-danger: #ef5a5a;
+	--of-code: #c9d6f0;
+	--of-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 14px 30px -18px rgba(0, 0, 0, 0.6);
+}
+
+html[data-theme='light'] {
+	--of-bg: #f4f6f9;
+	--of-surface: #ffffff;
+	--of-surface-2: #f1f3f7;
+	--of-raise: #f1f3f7;
+	--of-line: #e2e7ef;
+	--of-line-strong: #ccd4e0;
+	--of-ink: #141a22;
+	--of-muted: #5b6572;
+	--of-accent: #3b72d6;
+	--of-accent-strong: #2f5fc0;
+	--of-accent-ink: #ffffff;
+	--of-ok: #0f9e67;
+	--of-warn: #b27a08;
+	--of-danger: #c93434;
+	--of-code: #27406e;
+	--of-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 16px 32px -20px rgba(16, 24, 40, 0.18);
+}
+
+@theme inline {
+	--color-bg: var(--of-bg);
+	--color-panel: var(--of-surface);
+	--color-panel-2: var(--of-surface-2);
+	--color-line: var(--of-line);
+	--color-line-strong: var(--of-line-strong);
+	--color-ink: var(--of-ink);
+	--color-muted: var(--of-muted);
+	--color-accent: var(--of-accent);
+	--color-accent-strong: var(--of-accent-strong);
+	--color-accent-ink: var(--of-accent-ink);
+	--color-ok: var(--of-ok);
+	--color-warn: var(--of-warn);
+	--color-danger: var(--of-danger);
+	--color-code: var(--of-code);
+	--font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+/* --- base ---------------------------------------------------------------- */
+html {
+	color-scheme: dark;
+}
+html[data-theme='light'] {
+	color-scheme: light;
+}
+
+body {
+	@apply bg-bg text-ink font-sans antialiased;
+	background-image:
+		radial-gradient(1000px 480px at 12% -12%, rgba(91, 141, 239, 0.08), transparent 60%),
+		radial-gradient(800px 420px at 100% 0%, rgba(91, 141, 239, 0.05), transparent 55%);
+}
+html[data-theme='light'] body {
+	background-image: none;
+}
+
+::selection {
+	background: var(--of-accent);
+	color: var(--of-accent-ink);
+}
+
+/* --- scrollbars (subtle, flat) ------------------------------------------- */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--of-line-strong) transparent;
+}
+*::-webkit-scrollbar {
+	height: 8px;
+	width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+	background: var(--of-line-strong);
+	border-radius: 8px;
+}
+
+/* --- shared primitive classes -------------------------------------------- */
+.input {
+	@apply w-full rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-ink outline-none transition;
+	box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.input:focus {
+	border-color: var(--of-accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--of-accent) 22%, transparent);
+}
+.input::placeholder {
+	color: var(--of-muted);
+	opacity: 0.7;
+}
+
+/* select inherits .input but needs a native appearance kept in place */
+select.input {
+	appearance: auto;
+}
+
+/* --- data table ----------------------------------------------------------- */
+.of-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.875rem;
+}
+.of-table thead th {
+	padding: 0.625rem 0.875rem;
+	text-align: left;
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--of-muted);
+	border-bottom: 1px solid var(--of-line);
+	white-space: nowrap;
+}
+.of-table tbody td {
+	padding: 0.625rem 0.875rem;
+	border-bottom: 1px solid var(--of-line);
+	vertical-align: middle;
+}
+.of-table tbody tr:last-child td {
+	border-bottom: none;
+}
+.of-table .num {
+	text-align: right;
+}
+
+/* --- small square icon button --------------------------------------------- */
+.of-iconbtn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.375rem;
+	border-radius: 0.5rem;
+	color: var(--of-muted);
+	transition: color 0.15s, background-color 0.15s;
+}
+.of-iconbtn:hover {
+	color: var(--of-ink);
+	background: var(--of-raise);
+}
+.of-iconbtn:disabled {
+	opacity: 0.4;
+	pointer-events: none;
+}
+
+/* --- meters ----------------------------------------------------------------- */
+.of-meter {
+	height: 0.5rem;
+	overflow: hidden;
+	border-radius: 9999px;
+	background: var(--of-line);
+}
+.of-meter-fill {
+	height: 100%;
+	border-radius: 9999px;
+	background: var(--of-accent);
+	transition: width 0.4s ease;
+}
+.of-meter-fill-warn {
+	background: var(--of-warn);
+}
+.of-meter-fill-danger {
+	background: var(--of-danger);
+}
+
+/* --- logo wordmark ---------------------------------------------------------- */
+.of-logo {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.25rem 0.625rem;
+	border-radius: 0.5rem;
+	background: var(--of-accent);
+	color: var(--of-accent-ink);
+	font-size: 0.8rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+}
+.of-logo-lg {
+	padding: 0.4rem 0.9rem;
+	font-size: 1.15rem;
+	border-radius: 0.75rem;
+}

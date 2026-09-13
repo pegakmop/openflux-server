@@ -57,8 +57,12 @@ func (s *Store) GetNodeBySecretHash(ctx context.Context, secretHash string) (mod
 
 func (s *Store) ListNodes(ctx context.Context) ([]model.Node, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, max_keys, status, last_heartbeat_at, created_at
-		FROM nodes ORDER BY created_at DESC
+		SELECT n.id, n.name, n.max_keys, n.status, n.last_heartbeat_at, n.created_at,
+		       count(k.id) FILTER (WHERE k.enabled) AS active_keys
+		FROM nodes n
+		LEFT JOIN keys k ON k.assigned_node_id = n.id
+		GROUP BY n.id
+		ORDER BY n.created_at DESC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -68,7 +72,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]model.Node, error) {
 	var out []model.Node
 	for rows.Next() {
 		var n model.Node
-		if err := rows.Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt, &n.ActiveKeys); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		out = append(out, n)

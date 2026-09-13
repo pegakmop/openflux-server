@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenFlux control-plane web panel (SvelteKit/Bun)
+After=network.target controlplane.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=openflux
+Group=openflux
+WorkingDirectory=/opt/openflux/web
+EnvironmentFile=/etc/openflux/web.env
+ExecStart=/usr/local/bin/bun server.js
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# Bind is loopback by default; the panel is only reachable through Nginx
+# (or whoever fronts this box). Harden a bit:
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

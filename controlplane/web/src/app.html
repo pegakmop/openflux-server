@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru" data-theme="dark" class="h-full">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="robots" content="noindex" />
+		<title>OpenFlux</title>
+		<script>
+			// Apply the persisted theme before first paint to avoid a flash.
+			try {
+				var t = localStorage.getItem('openflux_web_theme');
+				var dark = t ? t === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+				document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+			} catch (e) {
+				/* localStorage unavailable - the default dark theme stays */
+			}
+		</script>
+		%sveltekit.head%
+	</head>
+	<body class="h-full" data-sveltekit-prefetch>
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>
