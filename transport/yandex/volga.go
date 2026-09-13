@@ -741,6 +741,17 @@ type wsListener struct {
 	onData func([]byte)
 	emit   func(code, detail string)
 
+	// recentRecvMu/recentRecv dedup inbound batches by content hash, the
+	// receive-side twin of relayClient's recentSent/wasRecentlySent. The WS
+	// subscribe URL's fetch_history=...:volga:0:1 param (see connect)
+	// replays the last message on every single reconnect - harmless if the
+	// connection genuinely dropped before that message was ever delivered,
+	// but a real double-delivery (and double count towards BytesReceived)
+	// whenever it wasn't, which given how often Volga has needed to
+	// reconnect is not a rare edge case.
+	recentRecvMu sync.Mutex
+	recentRecv   map[uint32]time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -853,6 +864,35 @@ func (w *wsListener) connect(attempt int) error {
 	w.emit(transport.EventConnected, strconv.Itoa(attempt))
 	utils.Debugf("[VOLGA] WS connected: user=%s", w.auth.UserIDStr)
 
+	// This connection is receive-only from our side - push.yandex.ru
+	// pushes updates to us, and we never have anything of our own to
+	// write on it after the initial dial. With zero outbound traffic for
+	// the connection's entire life, a NAT/firewall on the path (a mobile
+	// carrier's, most likely) can decide the "idle" connection is dead
+	// and drop it, which then surfaces here as ReadMessage returning
+	// "websocket: close 1005 (no status)" - the TCP connection simply
+	// vanished, not a real close handshake from either side. A periodic
+	// WS-protocol ping keeps real traffic flowing on our side too, so
+	// nothing on the path ever considers this connection idle.
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		ticker := time.NewTicker(25 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-w.ctx.Done():
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -948,6 +988,39 @@ func (w *wsListener) handleBundle(raw json.RawMessage) {
 	}
 }
 
+// markReceived/wasRecentlyReceived dedup inbound batches by content hash -
+// see the doc comment on wsListener.recentRecv for why this is needed
+// (fetch_history replaying the last message on every reconnect).
+func (w *wsListener) markReceived(data []byte) {
+	h := crc32.ChecksumIEEE(data)
+	now := time.Now()
+
+	w.recentRecvMu.Lock()
+	defer w.recentRecvMu.Unlock()
+	if w.recentRecv == nil {
+		w.recentRecv = make(map[uint32]time.Time)
+	}
+	w.recentRecv[h] = now
+	if len(w.recentRecv) > 512 {
+		cutoff := now.Add(-5 * time.Second)
+		for k, ts := range w.recentRecv {
+			if ts.Before(cutoff) {
+				delete(w.recentRecv, k)
+			}
+		}
+	}
+}
+
+func (w *wsListener) wasRecentlyReceived(data []byte) bool {
+	h := crc32.ChecksumIEEE(data)
+
+	w.recentRecvMu.Lock()
+	ts, ok := w.recentRecv[h]
+	w.recentRecvMu.Unlock()
+
+	return ok && time.Since(ts) < 5*time.Second
+}
+
 func (w *wsListener) handleBundleItem(raw json.RawMessage) {
 	var asObj struct {
 		ID     string `json:"id"`
@@ -970,6 +1043,11 @@ func (w *wsListener) handleBundleItem(raw json.RawMessage) {
 			utils.Debugf("[VOLGA] dropped self-echo batch (%d bytes)", len(decoded))
 			return
 		}
+		if w.wasRecentlyReceived(decoded) {
+			utils.Debugf("[VOLGA] dropped duplicate inbound batch (%d bytes) - likely a fetch_history replay after a reconnect", len(decoded))
+			return
+		}
+		w.markReceived(decoded)
 		packets := decodeBatch(decoded)
 		w.stats.PacketsRecv.Add(uint64(len(packets)))
 		w.stats.BytesReceived.Add(uint64(len(decoded)))
