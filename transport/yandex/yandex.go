@@ -51,6 +51,15 @@ const (
 	ydocsBatchMaxBytes = 4 * 1024 * 1024
 )
 
+// wsWriteTimeout bounds every WebSocket write. Without it, a write that
+// stalls (send buffer never drains - a one-directional network hiccup, not
+// necessarily a dead peer) blocks WriteMessage forever; writerLoop is the
+// one goroutine draining this session's queue for its whole life (a new one
+// is spawned only for the very first session - see connectToDoc), so once
+// it wedges there, sending is dead until the process is restarted even
+// though reads and reconnects keep working fine.
+const wsWriteTimeout = 10 * time.Second
+
 // defaultPingWindow is used when the server's engine.io "open" packet can't
 // be parsed for its own pingInterval/pingTimeout (see performHandshake) -
 // 25s+20s matches Socket.IO's own common server-side defaults.
@@ -97,7 +106,16 @@ type DocSession struct {
 func (s *DocSession) safeWrite(messageType int, data []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.Conn.WriteMessage(messageType, data)
+	s.Conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+	err := s.Conn.WriteMessage(messageType, data)
+	if err != nil {
+		// A stalled write means this connection is dead in at least one
+		// direction - close it so the read loop notices and reconnects
+		// instead of leaving writerLoop pointed at a socket that will just
+		// time out the same way on every future write too.
+		s.Conn.Close()
+	}
+	return err
 }
 
 type YandexDocsTransport struct {
@@ -320,6 +338,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			if err != nil {
 				utils.Debugf("[YDOCS] Read error: %v", err)
 				t.SetConnected(false)
+				conn.Close()
 				// A session that stayed up for a while dropping is a normal,
 				// unremarkable blip (Yandex's own infra recycling the
 				// connection, a brief network hiccup) - not evidence the
@@ -386,12 +405,14 @@ func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token strin
 			if err != nil {
 				return 0, fmt.Errorf("marshal namespace-connect: %w", err)
 			}
+			conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 			if err := conn.WriteMessage(websocket.TextMessage, append([]byte("40"), authPkt...)); err != nil {
 				return 0, fmt.Errorf("send namespace-connect: %w", err)
 			}
 			sentConnect = true
 
 		case text == "2":
+			conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 			if err := conn.WriteMessage(websocket.TextMessage, []byte("3")); err != nil {
 				return 0, fmt.Errorf("pong during handshake: %w", err)
 			}
