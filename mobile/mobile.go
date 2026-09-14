@@ -231,6 +231,23 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	return nil
 }
 
+// NetworkChanged tells the running tunnel's transport to retry right now
+// instead of waiting to notice on its own - see
+// transport.Transport.ForceReconnect's doc comment for why that matters on
+// a network that goes silent instead of resetting the connection. The
+// caller (Android's ConnectivityManager, or the equivalent on another
+// platform) already knows the active network changed well before a read or
+// write on the old one would ever time out. A safe no-op when nothing is
+// running.
+func NetworkChanged() {
+	mu.Lock()
+	s := current
+	mu.Unlock()
+	if s != nil {
+		s.trans.ForceReconnect()
+	}
+}
+
 // StopTunnel tears down the currently running tunnel, if any. Safe to call
 // when nothing is running.
 func StopTunnel() error {

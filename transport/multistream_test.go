@@ -19,6 +19,7 @@ func (f *fakeStream) Receive(cb func([]byte))               { f.recvCB = cb }
 func (f *fakeStream) IsConnected() bool                     { return f.connected }
 func (f *fakeStream) Stats() TransportStats                 { return f.stats }
 func (f *fakeStream) SetEventCallback(func(string, string)) {}
+func (f *fakeStream) ForceReconnect()                        {}
 
 // packet builds the minimal bytes streamIndex looks at: an IPv4 header
 // (20 bytes, no options) followed by 4 bytes carrying srcPort/dstPort in

@@ -107,3 +107,9 @@ func (m *MultiStreamTransport) SetEventCallback(fn func(code, detail string)) {
 		s.SetEventCallback(fn)
 	}
 }
+
+func (m *MultiStreamTransport) ForceReconnect() {
+	for _, s := range m.streams {
+		s.ForceReconnect()
+	}
+}
