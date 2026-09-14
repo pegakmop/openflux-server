@@ -2,19 +2,10 @@ package transport
 
 import "sync"
 
-// MultiStreamTransport spreads one tunnel's traffic across several
-// independent underlying transports (e.g. several Yandex Docs sessions) to
-// get past the throughput ceiling of a single one - each stream is its own
-// real TCP-backed connection, so N streams give roughly N times the window
-// a single connection is limited to.
-//
-// Routing is by flow, not round-robin: every packet's (src port, dst port)
-// pair picks the same stream for the life of that flow (see streamIndex),
-// so one real TCP connection's segments always travel one physical stream
-// and arrive in order. This only multiplies throughput across CONCURRENT
-// flows (parallel connections, as a browser or a downloader already opens)
-// - a single flow never spans more than one stream and is bounded by that
-// one stream's own ceiling.
+// MultiStreamTransport spreads traffic across several underlying
+// transports, routed by flow (see streamIndex) so one real connection
+// always rides one stream in order - this multiplies throughput across
+// concurrent flows, not a single one.
 type MultiStreamTransport struct {
 	streams []Transport
 
@@ -60,11 +51,8 @@ func (m *MultiStreamTransport) Send(data []byte) error {
 	return m.streams[streamIndex(data, len(m.streams))].Send(data)
 }
 
-// streamIndex picks a stream by hashing the packet's two port fields, which
-// sit at the same offset (bytes 0-3 of the L4 header) for both TCP and UDP.
-// XOR is used instead of concatenation so the result is identical from
-// either direction of a flow - a reply has src/dst swapped relative to the
-// request, and XOR doesn't care which order its inputs came in.
+// streamIndex hashes src^dst port (same offset for TCP/UDP) - XOR keeps the
+// result identical for a reply, whose ports are swapped relative to the request.
 func streamIndex(data []byte, n int) int {
 	if n <= 1 {
 		return 0
@@ -88,9 +76,6 @@ func (m *MultiStreamTransport) Receive(callback func([]byte)) {
 	m.mu.Unlock()
 }
 
-// IsConnected reports true as long as at least one stream is up - the
-// tunnel keeps carrying traffic (on fewer streams) rather than being torn
-// down over one stream's transient reconnect.
 func (m *MultiStreamTransport) IsConnected() bool {
 	for _, s := range m.streams {
 		if s.IsConnected() {

@@ -84,14 +84,8 @@ type Config struct {
 	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
 	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
 
-	// DocURLs is yandex_multistream's doc_url: one independent Yandex Docs
-	// session per entry (2+ required), each a full real TCP connection of
-	// its own - see transport.MultiStreamTransport for why this raises the
-	// throughput ceiling a single session runs into, and what it doesn't
-	// (a single real connection through the tunnel still rides just one of
-	// these). The exit node this pairs with must be given the exact same
-	// list, in any order - each side hashes packets to a stream
-	// independently, with no coordination between them.
+	// DocURLs is yandex_multistream's doc_url: 2+ independent Yandex Docs
+	// sessions. The exit node needs the exact same list, any order.
 	DocURLs []string `json:"doc_urls,omitempty"`
 
 	// KeyToken, when set, also becomes the ChaCha20-Poly1305 key encrypting
@@ -239,9 +233,8 @@ func StopTunnel() error {
 
 // buildTransport picks and constructs the transport for cfg. wrapped
 // reports whether it already carries its own compression/encryption
-// (yandex_multistream does this per-stream, see below) - StartTunnel skips
-// its own wrapping when true, since a second layer on top would just
-// compress/encrypt an already-compressed/encrypted blob.
+// (yandex_multistream does this per-stream) - StartTunnel skips its own
+// wrapping when true.
 func buildTransport(cfg Config, transportConfig transport.TransportConfig) (trans transport.Transport, wrapped bool, err error) {
 	if cfg.Mode != "manual" {
 		return nil, false, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)

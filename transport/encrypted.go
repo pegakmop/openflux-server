@@ -14,18 +14,10 @@ import (
 )
 
 // EncryptedTransport wraps another Transport with ChaCha20-Poly1305 keyed by
-// a key's token. ChaCha20 over AES-GCM: no AES-NI/ARM-crypto dependency for
-// speed, so budget phones without hardware AES aren't slower than
-// flagships. Belongs INSIDE CompressedTransport (encrypt the already-
-// compressed bytes).
-//
-// The exit-node side auto-detects instead of encrypting unconditionally: an
-// old app build, or an entirely different client that was never taught
-// about this, will never send ciphertext at all, and the exit node must
-// keep working for it exactly as before rather than breaking the tunnel.
-// The client side always encrypts once configured with a token - if it
-// waited for proof first too, neither side would ever send the first
-// encrypted packet.
+// a key's token - chosen over AES-GCM since it doesn't need AES-NI to be
+// fast. Belongs inside CompressedTransport. The exit-node side auto-detects
+// per peer instead of assuming encryption (see Receive) so an old app or a
+// different client that never encrypts keeps working.
 type EncryptedTransport struct {
 	Transport
 	send    [chacha20poly1305.KeySize]byte
@@ -37,22 +29,15 @@ type EncryptedTransport struct {
 }
 
 // NewEncryptedTransport derives separate send/receive keys from token via
-// HKDF (token is already 256 random bits, not a password - no slow KDF
-// needed). isExitNode both picks which derived key is "ours to send with"
-// and enables the auto-detect fallback described above.
+// HKDF. isExitNode picks which derived key is "ours to send with" and
+// enables the auto-detect fallback.
 func NewEncryptedTransport(inner Transport, token string, isExitNode bool) *EncryptedTransport {
 	return newEncryptedTransport(inner, token, isExitNode, "")
 }
 
 // NewEncryptedTransportForStream is NewEncryptedTransport for one stream of
-// a MultiStreamTransport: each stream gets its own key, derived with the
-// stream's index folded into the HKDF info string, rather than sharing one
-// key across streams with independent nonce counters - two streams could
-// otherwise both send their own "packet #1" under the same key, reusing a
-// nonce (see EncryptedTransport's doc comment on why that must never
-// happen). streamIndex 0 here deliberately does NOT match plain
-// NewEncryptedTransport's key - a multi-stream and a single-stream peer are
-// never meant to talk to each other.
+// a MultiStreamTransport - each stream gets its own key so independent
+// per-stream nonce counters never collide under the same key.
 func NewEncryptedTransportForStream(inner Transport, token string, isExitNode bool, streamIndex int) *EncryptedTransport {
 	return newEncryptedTransport(inner, token, isExitNode, fmt.Sprintf(" stream %d", streamIndex))
 }
@@ -78,9 +63,8 @@ func deriveKey(base []byte, info string) [chacha20poly1305.KeySize]byte {
 }
 
 // Send's nonce is a monotonic counter, prepended so Receive doesn't need
-// packets in order to reconstruct it. On the exit-node side, stays
-// plaintext until this specific peer has proven (via Receive) that it
-// understands encryption at all.
+// packets in order. Stays plaintext until this peer proves (via Receive)
+// it understands encryption.
 func (e *EncryptedTransport) Send(data []byte) error {
 	if e.autoDetect && !e.peerEncrypts.Load() {
 		return e.Transport.Send(data)
@@ -117,10 +101,7 @@ func (e *EncryptedTransport) Receive(callback func([]byte)) {
 			}
 		}
 		if e.autoDetect {
-			// An old/foreign client that never encrypted at all, not a
-			// corrupted packet - pass it through as-is instead of dropping
-			// real traffic.
-			callback(data)
+			callback(data) // an old/foreign client that never encrypts, not corruption
 			return
 		}
 		utils.Debugf("[CRYPT] decrypt failed")

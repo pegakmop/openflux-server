@@ -51,13 +51,9 @@ const (
 	ydocsBatchMaxBytes = 4 * 1024 * 1024
 )
 
-// wsWriteTimeout bounds every WebSocket write. Without it, a write that
-// stalls (send buffer never drains - a one-directional network hiccup, not
-// necessarily a dead peer) blocks WriteMessage forever; writerLoop is the
-// one goroutine draining this session's queue for its whole life (a new one
-// is spawned only for the very first session - see connectToDoc), so once
-// it wedges there, sending is dead until the process is restarted even
-// though reads and reconnects keep working fine.
+// wsWriteTimeout bounds every WebSocket write - without it, a stalled write
+// blocks WriteMessage forever and writerLoop (the one goroutine draining a
+// session's queue for its whole life) wedges there permanently.
 const wsWriteTimeout = 10 * time.Second
 
 // defaultPingWindow is used when the server's engine.io "open" packet can't
@@ -109,11 +105,7 @@ func (s *DocSession) safeWrite(messageType int, data []byte) error {
 	s.Conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	err := s.Conn.WriteMessage(messageType, data)
 	if err != nil {
-		// A stalled write means this connection is dead in at least one
-		// direction - close it so the read loop notices and reconnects
-		// instead of leaving writerLoop pointed at a socket that will just
-		// time out the same way on every future write too.
-		s.Conn.Close()
+		s.Conn.Close() // let the read loop notice and reconnect
 	}
 	return err
 }
