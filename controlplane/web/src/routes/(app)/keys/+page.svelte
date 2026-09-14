@@ -52,10 +52,12 @@
 	// create form
 	let label = $state('');
 	let docUrl = $state('');
+	let docUrls = $state('');
 	let transport = $state('yandex');
 	let limitGb = $state('');
 	let ownerRef = $state('');
 	let creating = $state(false);
+	const isMultistream = $derived(transport === 'yandex_multistream');
 
 	// result (fresh token / deeplink)
 	let result = $state<CreateKeyResult | RotateKeyResult | null>(null);
@@ -113,7 +115,17 @@
 
 	async function create() {
 		if (creating) return;
-		if (!docUrl.trim()) {
+		let parsedDocUrls: string[] = [];
+		if (isMultistream) {
+			parsedDocUrls = docUrls
+				.split('\n')
+				.map((s) => s.trim())
+				.filter((s) => s);
+			if (parsedDocUrls.length < 2) {
+				createError = t('keys.invalidDocUrls');
+				return;
+			}
+		} else if (!docUrl.trim()) {
 			createError = t('keys.invalidDoc');
 			return;
 		}
@@ -122,7 +134,8 @@
 		try {
 			result = await api.createKey({
 				label: label.trim() || undefined,
-				doc_url: docUrl.trim(),
+				doc_url: isMultistream ? undefined : docUrl.trim(),
+				doc_urls: isMultistream ? parsedDocUrls : undefined,
 				transport: transport || undefined,
 				traffic_limit_bytes: gbToBytes(limitGb),
 				owner_ref: ownerRef.trim() || undefined
@@ -130,6 +143,7 @@
 			toast.ok(t('keys.createSuccess'));
 			label = '';
 			docUrl = '';
+			docUrls = '';
 			ownerRef = '';
 			limitGb = '';
 			await loadKeys();
@@ -254,14 +268,22 @@
 				<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.label')}</span>
 				<input class="input" bind:value={label} placeholder={t('keys.labelPh')} />
 			</label>
-			<label class="block">
-				<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.docUrl')} *</span>
-				<input class="input" bind:value={docUrl} placeholder={t('keys.docUrlPh')} />
-			</label>
+			{#if isMultistream}
+				<label class="block">
+					<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.docUrls')} *</span>
+					<textarea class="input" rows="3" bind:value={docUrls} placeholder={t('keys.docUrlsPh')}></textarea>
+				</label>
+			{:else}
+				<label class="block">
+					<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.docUrl')} *</span>
+					<input class="input" bind:value={docUrl} placeholder={t('keys.docUrlPh')} />
+				</label>
+			{/if}
 			<label class="block">
 				<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.transport')}</span>
 				<select class="input" bind:value={transport}>
 					<option value="yandex">yandex</option>
+					<option value="yandex_multistream">yandex_multistream</option>
 					<option value="direct">direct</option>
 				</select>
 			</label>

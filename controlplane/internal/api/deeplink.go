@@ -24,7 +24,7 @@ import (
 // deep link whose control_url doesn't actually resolve to this server isn't
 // useful to hand out, so callers should treat "" as "omit it" rather than
 // including a broken link.
-func buildDeepLink(publicBaseURL, label, keyToken, docURL, transportName string) string {
+func buildDeepLink(publicBaseURL, label, keyToken, docURL string, docURLs []string, transportName string) string {
 	if publicBaseURL == "" {
 		return ""
 	}
@@ -35,6 +35,13 @@ func buildDeepLink(publicBaseURL, label, keyToken, docURL, transportName string)
 		"key_token":   keyToken,
 		"doc_url":     docURL,
 		"transport":   transportName,
+	}
+	// Only set for yandex_multistream - see model.Key.DocURLs. Omitted
+	// (rather than an empty array) for every other transport, matching how
+	// every other optional field here works: the app's decoder only reads
+	// this key at all when present (org.openflux.app.data.ProfileDeepLink).
+	if len(docURLs) > 0 {
+		payload["doc_urls"] = docURLs
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

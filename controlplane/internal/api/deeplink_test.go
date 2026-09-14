@@ -8,13 +8,13 @@ import (
 )
 
 func TestBuildDeepLinkEmptyWithoutPublicBaseURL(t *testing.T) {
-	if got := buildDeepLink("", "label", "tok", "https://docs.yandex.ru/x", "yandex"); got != "" {
+	if got := buildDeepLink("", "label", "tok", "https://docs.yandex.ru/x", nil, "yandex"); got != "" {
 		t.Errorf("buildDeepLink with no public base URL = %q, want empty", got)
 	}
 }
 
 func TestBuildDeepLinkRoundTrips(t *testing.T) {
-	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "https://docs.yandex.ru/x", "yandex")
+	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "https://docs.yandex.ru/x", nil, "yandex")
 
 	const prefix = "openflux://import?data="
 	if !strings.HasPrefix(link, prefix) {
@@ -45,6 +45,34 @@ func TestBuildDeepLinkRoundTrips(t *testing.T) {
 	for k, v := range want {
 		if payload[k] != v {
 			t.Errorf("payload[%q] = %v, want %v", k, payload[k], v)
+		}
+	}
+	if _, present := payload["doc_urls"]; present {
+		t.Errorf("payload has doc_urls = %v, want it omitted for a non-multistream key", payload["doc_urls"])
+	}
+}
+
+func TestBuildDeepLinkIncludesDocURLsForMultistream(t *testing.T) {
+	urls := []string{"https://docs.yandex.ru/a", "https://docs.yandex.ru/b"}
+	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "", urls, "yandex_multistream")
+
+	data := strings.TrimPrefix(link, "openflux://import?data=")
+	decoded, err := base64.RawURLEncoding.DecodeString(data)
+	if err != nil {
+		t.Fatalf("payload is not valid unpadded base64url: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+
+	gotURLs, ok := payload["doc_urls"].([]any)
+	if !ok || len(gotURLs) != len(urls) {
+		t.Fatalf("payload[doc_urls] = %v, want %v", payload["doc_urls"], urls)
+	}
+	for i, u := range urls {
+		if gotURLs[i] != u {
+			t.Errorf("payload[doc_urls][%d] = %v, want %v", i, gotURLs[i], u)
 		}
 	}
 }

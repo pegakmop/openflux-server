@@ -197,7 +197,7 @@ func (a *App) handleRotateKeyToken(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, rotateKeyTokenResponse{
 		Token:    token,
-		DeepLink: buildDeepLink(a.Config.PublicBaseURL, k.Label, token, k.DocURL, k.Transport),
+		DeepLink: buildDeepLink(a.Config.PublicBaseURL, k.Label, token, k.DocURL, k.DocURLs, k.Transport),
 	})
 }
 
@@ -253,8 +253,8 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 
 		// Only re-enabling needs the doc_url check: a disabled key isn't
 		// running a worker and can't collide with anything (see
-		// HasEnabledKeyWithDocURL's doc comment), and disabling never
-		// changes doc_url so it can't create a collision either.
+		// HasEnabledKeyWithAnyDocURL's doc comment), and disabling never
+		// changes its URLs so it can't create a collision either.
 		if enabled {
 			k, err := a.Store.GetKeyByID(r.Context(), id)
 			if err == store.ErrNotFound {
@@ -264,7 +264,11 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 				writeInternalError(w, r, "get key failed", err)
 				return
 			}
-			inUse, err := a.Store.HasEnabledKeyWithDocURL(r.Context(), k.DocURL, id)
+			urls := k.DocURLs
+			if len(urls) == 0 {
+				urls = []string{k.DocURL}
+			}
+			inUse, err := a.Store.HasEnabledKeyWithAnyDocURL(r.Context(), urls, id)
 			if err != nil {
 				writeInternalError(w, r, "check doc_url failed", err)
 				return

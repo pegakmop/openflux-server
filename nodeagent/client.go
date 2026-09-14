@@ -29,11 +29,14 @@ func NewControlClient(baseURL, nodeToken string) *ControlClient {
 }
 
 type RemoteKey struct {
-	ID                string `json:"id"`
-	DocURL            string `json:"doc_url"`
-	Transport         string `json:"transport"`
-	TrafficLimitBytes *int64 `json:"traffic_limit_bytes,omitempty"`
-	BytesUsedTotal    int64  `json:"bytes_used_total"`
+	ID     string `json:"id"`
+	DocURL string `json:"doc_url"`
+	// DocURLs is set instead of DocURL for transport "yandex_multistream"
+	// (2+ URLs) - see transport.NewMultiStreamTransport.
+	DocURLs           []string `json:"doc_urls,omitempty"`
+	Transport         string   `json:"transport"`
+	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
+	BytesUsedTotal    int64    `json:"bytes_used_total"`
 	// Token, when set, is the raw key token - the client uses it as the
 	// end-to-end encryption key (see transport.NewEncryptedTransport), so
 	// this worker needs the same value to derive matching keys. Empty for

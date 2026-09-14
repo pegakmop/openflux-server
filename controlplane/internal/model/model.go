@@ -16,10 +16,14 @@ type Node struct {
 }
 
 type Key struct {
-	ID                 string
-	Label              string
-	Transport          string
-	DocURL             string
+	ID        string
+	Label     string
+	Transport string
+	DocURL    string
+	// DocURLs is the yandex_multistream transport's 2+ independent Yandex
+	// Docs URLs (see transport.MultiStreamTransport); empty for every other
+	// transport, which keeps using DocURL instead.
+	DocURLs            []string
 	AssignedNodeID     *string
 	Enabled            bool
 	TrafficLimitBytes  *int64

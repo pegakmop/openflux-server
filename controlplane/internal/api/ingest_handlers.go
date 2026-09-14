@@ -9,13 +9,18 @@ import (
 )
 
 type createKeyRequest struct {
-	Label             string     `json:"label"`
-	Transport         string     `json:"transport"`
-	DocURL            string     `json:"doc_url"`
+	Label     string `json:"label"`
+	Transport string `json:"transport"`
+	DocURL    string `json:"doc_url"`
+	// DocURLs is required instead of DocURL when Transport is
+	// "yandex_multistream" (2+ URLs) - see model.Key.DocURLs.
+	DocURLs           []string   `json:"doc_urls"`
 	TrafficLimitBytes *int64     `json:"traffic_limit_bytes"`
 	OwnerRef          string     `json:"owner_ref"`
 	ExpiresAt         *time.Time `json:"expires_at"`
 }
+
+const transportYandexMultistream = "yandex_multistream"
 
 type createdKey struct {
 	ID       string `json:"id"`
@@ -61,27 +66,48 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		return
 	}
 
-	// Tracks doc_urls claimed earlier in this same batch, since
-	// HasEnabledKeyWithDocURL only sees keys already committed to the
-	// database - two entries in one bulk-import request sharing a doc_url
-	// would otherwise both pass that check before either is inserted.
-	docURLsInBatch := make(map[string]bool, len(reqs))
+	// Tracks every URL (doc_url, or every entry of doc_urls) claimed earlier
+	// in this same batch, since HasEnabledKeyWithAnyDocURL only sees keys
+	// already committed to the database - two entries in one bulk-import
+	// request sharing a URL would otherwise both pass that check before
+	// either is inserted.
+	urlsInBatch := make(map[string]bool, len(reqs))
 
 	created := make([]createdKey, 0, len(reqs))
 	for _, req := range reqs {
-		if req.DocURL == "" {
-			writeError(w, http.StatusBadRequest, "doc_url is required for every key")
-			return
+		if req.Transport == "" {
+			req.Transport = "yandex"
 		}
+
+		var urls []string
+		if req.Transport == transportYandexMultistream {
+			if len(req.DocURLs) < 2 {
+				writeError(w, http.StatusBadRequest, "doc_urls needs 2+ entries for transport=yandex_multistream")
+				return
+			}
+			urls = req.DocURLs
+			req.DocURL = "" // ignore a stray doc_url - doc_urls is authoritative for this transport
+		} else {
+			if req.DocURL == "" {
+				writeError(w, http.StatusBadRequest, "doc_url is required for every key")
+				return
+			}
+			urls = []string{req.DocURL}
+			req.DocURLs = nil
+		}
+
 		// Two enabled keys sharing one Yandex Docs document sit in the same
-		// broadcast room - see HasEnabledKeyWithDocURL's doc comment - and a
-		// new key is enabled immediately (enabled defaults to true), so this
-		// has to be checked at creation time, not just when re-enabling one.
-		if docURLsInBatch[req.DocURL] {
-			writeError(w, http.StatusConflict, "doc_url is used by more than one key in this request - each key needs its own Yandex Docs document")
-			return
+		// broadcast room - see HasEnabledKeyWithAnyDocURL's doc comment -
+		// and a new key is enabled immediately (enabled defaults to true),
+		// so this has to be checked at creation time, not just when
+		// re-enabling one.
+		for _, u := range urls {
+			if urlsInBatch[u] {
+				writeError(w, http.StatusConflict, "doc_url is used by more than one key in this request - each key needs its own Yandex Docs document")
+				return
+			}
 		}
-		inUse, err := a.Store.HasEnabledKeyWithDocURL(r.Context(), req.DocURL, "")
+		inUse, err := a.Store.HasEnabledKeyWithAnyDocURL(r.Context(), urls, "")
 		if err != nil {
 			writeInternalError(w, r, "check doc_url failed", err)
 			return
@@ -90,9 +116,8 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
 			return
 		}
-		docURLsInBatch[req.DocURL] = true
-		if req.Transport == "" {
-			req.Transport = "yandex"
+		for _, u := range urls {
+			urlsInBatch[u] = true
 		}
 		ownerRef := req.OwnerRef
 		if forcedOwnerRef != "" {
@@ -116,6 +141,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			Label:             req.Label,
 			Transport:         req.Transport,
 			DocURL:            req.DocURL,
+			DocURLs:           req.DocURLs,
 			TrafficLimitBytes: req.TrafficLimitBytes,
 			OwnerRef:          ownerRef,
 			ExpiresAt:         req.ExpiresAt,
@@ -128,7 +154,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		created = append(created, createdKey{
 			ID:       k.ID,
 			Token:    token,
-			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token, req.DocURL, req.Transport),
+			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token, req.DocURL, req.DocURLs, req.Transport),
 		})
 	}
 

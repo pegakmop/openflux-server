@@ -8,11 +8,12 @@ import (
 )
 
 type nodeKeyResponse struct {
-	ID                string `json:"id"`
-	DocURL            string `json:"doc_url"`
-	Transport         string `json:"transport"`
-	TrafficLimitBytes *int64 `json:"traffic_limit_bytes,omitempty"`
-	BytesUsedTotal    int64  `json:"bytes_used_total"`
+	ID                string   `json:"id"`
+	DocURL            string   `json:"doc_url"`
+	DocURLs           []string `json:"doc_urls,omitempty"`
+	Transport         string   `json:"transport"`
+	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
+	BytesUsedTotal    int64    `json:"bytes_used_total"`
 	// Token is the raw key token, decrypted here (only a node-authenticated
 	// request reaches this handler at all) so the assigned worker can derive
 	// the same end-to-end encryption key the client used - see
@@ -41,6 +42,7 @@ func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
 		out = append(out, nodeKeyResponse{
 			ID:                k.ID,
 			DocURL:            k.DocURL,
+			DocURLs:           k.DocURLs,
 			Transport:         k.Transport,
 			TrafficLimitBytes: k.TrafficLimitBytes,
 			BytesUsedTotal:    k.BytesSentTotal + k.BytesReceivedTotal,

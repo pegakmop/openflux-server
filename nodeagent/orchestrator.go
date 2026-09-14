@@ -6,6 +6,7 @@ package nodeagent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -186,8 +187,12 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 		if _, exists := o.workers[id]; exists {
 			continue
 		}
-		if k.Transport != "yandex" {
-			utils.Debugf("[NODEAGENT] skipping key %s: managed mode only supports the yandex transport today", id)
+		if k.Transport != "yandex" && k.Transport != "yandex_multistream" {
+			utils.Debugf("[NODEAGENT] skipping key %s: managed mode only supports the yandex/yandex_multistream transports today", id)
+			continue
+		}
+		if k.Transport == "yandex_multistream" && len(k.DocURLs) < 2 {
+			utils.Debugf("[NODEAGENT] skipping key %s: yandex_multistream needs 2+ doc_urls, got %d", id, len(k.DocURLs))
 			continue
 		}
 
@@ -207,7 +212,18 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		return nil, fmt.Errorf("no port range capacity left on this node")
 	}
 
-	var trans transport.Transport = yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig())
+	var trans transport.Transport
+	label := k.DocURL
+	if k.Transport == "yandex_multistream" {
+		streams := make([]transport.Transport, len(k.DocURLs))
+		for i, url := range k.DocURLs {
+			streams[i] = yandex.NewYandexDocsTransport(url, transport.DefaultConfig())
+		}
+		trans = transport.NewMultiStreamTransport(streams)
+		label = strings.Join(k.DocURLs, ",")
+	} else {
+		trans = yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig())
+	}
 	if k.Token != "" {
 		trans = transport.NewEncryptedTransport(trans, k.Token, true)
 	}
@@ -223,7 +239,7 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 	// could independently pick the same source port at the same time and
 	// cross-deliver each other's traffic.
 	tun.SetPortRange(portStart, portEnd)
-	return &worker{trans: trans, tun: tun, docURL: k.DocURL, portIdx: portIdx}, nil
+	return &worker{trans: trans, tun: tun, docURL: label, portIdx: portIdx}, nil
 }
 
 func (o *Orchestrator) stopWorker(w *worker) {

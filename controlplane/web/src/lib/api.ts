@@ -23,6 +23,8 @@ export interface KeyDTO {
 	Label: string;
 	Transport: string;
 	DocURL: string;
+	// Set instead of DocURL for Transport "yandex_multistream" (2+ URLs).
+	DocURLs: string[] | null;
 	AssignedNodeID: string | null;
 	Enabled: boolean;
 	TrafficLimitBytes: number | null;
@@ -186,7 +188,8 @@ export const api = {
 	},
 	createKey: (body: {
 		label?: string;
-		doc_url: string;
+		doc_url?: string;
+		doc_urls?: string[];
 		transport?: string;
 		traffic_limit_bytes?: number;
 		owner_ref?: string;

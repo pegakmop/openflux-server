@@ -9,11 +9,12 @@ import (
 )
 
 type resolveResponse struct {
-	Status            string `json:"status"`
-	DocURL            string `json:"doc_url,omitempty"`
-	Transport         string `json:"transport,omitempty"`
-	BytesUsedTotal    int64  `json:"bytes_used_total"`
-	TrafficLimitBytes *int64 `json:"traffic_limit_bytes,omitempty"`
+	Status            string   `json:"status"`
+	DocURL            string   `json:"doc_url,omitempty"`
+	DocURLs           []string `json:"doc_urls,omitempty"`
+	Transport         string   `json:"transport,omitempty"`
+	BytesUsedTotal    int64    `json:"bytes_used_total"`
+	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 }
 
 // handleResolve lets a client (the future Android app, or the desktop CLI)
@@ -45,6 +46,7 @@ func (a *App) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	if status == "active" {
 		resp.DocURL = k.DocURL
+		resp.DocURLs = k.DocURLs
 		resp.Transport = k.Transport
 	}
 
