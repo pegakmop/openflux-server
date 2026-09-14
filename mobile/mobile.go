@@ -20,6 +20,7 @@ import (
 	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/tunnel"
+	"universal-bypass-tool/utils"
 )
 
 // originalResolver is whatever net.DefaultResolver was before StartTunnel
@@ -49,6 +50,10 @@ type Callback interface {
 	// code/detail are transport.Event* constants and their documented
 	// detail shapes (see transport/transport.go).
 	OnLogEvent(code string, detail string)
+	// OnRawLog delivers one line of the engine's internal debug log
+	// (raw sockets, transport internals, ...) - only fires when
+	// Config.VerboseLogging is set.
+	OnRawLog(line string)
 }
 
 // Protector exempts a raw socket fd from the Android VPN's own tunnel
@@ -117,6 +122,11 @@ type Config struct {
 	// (or refuses to answer for) those two public ones; it has no bearing on
 	// DNSUpstream above, which is queried only once the tunnel is already up.
 	ForceBootstrapDNS string `json:"force_bootstrap_dns,omitempty"`
+
+	// VerboseLogging turns on the engine's internal debug log (raw sockets,
+	// transport internals, ...) for this session, delivered via
+	// Callback.OnRawLog.
+	VerboseLogging bool `json:"verbose_logging,omitempty"`
 }
 
 type session struct {
@@ -148,6 +158,17 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	var cfg Config
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		return fail(cb, fmt.Errorf("parse config: %w", err))
+	}
+
+	utils.SetVerbose(cfg.VerboseLogging)
+	if cfg.VerboseLogging {
+		utils.SetLogSink(func(line string) {
+			if cb != nil {
+				cb.OnRawLog(line)
+			}
+		})
+	} else {
+		utils.SetLogSink(nil)
 	}
 
 	if protector != nil {
@@ -218,6 +239,7 @@ func StopTunnel() error {
 	transport.SetProtector(nil)
 	transport.SetBootstrapDNSServers(nil)
 	net.DefaultResolver = originalResolver
+	utils.SetLogSink(nil)
 
 	if s == nil {
 		return nil
