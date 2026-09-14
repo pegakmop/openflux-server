@@ -79,6 +79,7 @@ export const en: Dict = {
 	'keys.docUrls': 'Yandex Docs links (2+, one per line)',
 	'keys.docUrlsPh': 'https://docs.yandex.ru/a\nhttps://docs.yandex.ru/b',
 	'keys.transport': 'Transport',
+	'keys.e2e': 'E2E-encrypt traffic',
 	'keys.limitGb': 'Traffic limit, GB (empty = no limit)',
 	'keys.limitGbShort': 'Limit, GB',
 	'keys.owner': 'Owner (optional)',

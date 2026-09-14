@@ -23,7 +23,14 @@ type Key struct {
 	// DocURLs is the yandex_multistream transport's 2+ independent Yandex
 	// Docs URLs (see transport.MultiStreamTransport); empty for every other
 	// transport, which keeps using DocURL instead.
-	DocURLs            []string
+	DocURLs []string
+	// E2EEncryption is the operator's preference for whether a client
+	// should turn on transport.EncryptedTransport for this key - see
+	// migration 0004_key_e2e_encryption.sql. Doesn't change how an exit
+	// node behaves (it auto-detects either way); this is what /v1/resolve
+	// and the deep link hand the app as the default for a freshly imported
+	// profile.
+	E2EEncryption      bool
 	AssignedNodeID     *string
 	Enabled            bool
 	TrafficLimitBytes  *int64

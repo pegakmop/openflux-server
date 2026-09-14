@@ -241,6 +241,12 @@
         </div>
         <div><label for="key-limit">Лимит трафика, ГБ (пусто = без лимита)</label><input id="key-limit" type="number" min="0" /></div>
         <div><label for="key-owner">Владелец (необязательно)</label><input id="key-owner" placeholder="customer-id" /></div>
+        <div>
+          <label for="key-e2e" style="display:flex;align-items:center;gap:8px;margin-top:32px;cursor:pointer">
+            <input id="key-e2e" type="checkbox" style="width:auto" />
+            E2E-шифрование трафика
+          </label>
+        </div>
         <div><button id="key-create-btn">Создать</button></div>
       </div>
       <div id="key-token-box"></div>
@@ -484,7 +490,8 @@
     var transport = document.getElementById("key-transport").value;
     var limitGb = document.getElementById("key-limit").value;
     var owner = document.getElementById("key-owner").value.trim();
-    var body = { label: label, transport: transport, owner_ref: owner };
+    var e2e = document.getElementById("key-e2e").checked;
+    var body = { label: label, transport: transport, owner_ref: owner, e2e_encryption: e2e };
     if (transport === "yandex_multistream") {
       var docUrls = document.getElementById("key-docurls").value.split("\n")
         .map(function (s) { return s.trim(); }).filter(function (s) { return s; });
@@ -508,6 +515,7 @@
         document.getElementById("key-docurls").value = "";
         document.getElementById("key-limit").value = "";
         document.getElementById("key-owner").value = "";
+        document.getElementById("key-e2e").checked = false;
         toast("Ключ создан");
         loadKeys();
       }).catch(function (e) { toast(e.message, true); });

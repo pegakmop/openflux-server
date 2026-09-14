@@ -8,13 +8,13 @@ import (
 )
 
 func TestBuildDeepLinkEmptyWithoutPublicBaseURL(t *testing.T) {
-	if got := buildDeepLink("", "label", "tok", "https://docs.yandex.ru/x", nil, "yandex"); got != "" {
+	if got := buildDeepLink("", "label", "tok", "https://docs.yandex.ru/x", nil, "yandex", false); got != "" {
 		t.Errorf("buildDeepLink with no public base URL = %q, want empty", got)
 	}
 }
 
 func TestBuildDeepLinkRoundTrips(t *testing.T) {
-	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "https://docs.yandex.ru/x", nil, "yandex")
+	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "https://docs.yandex.ru/x", nil, "yandex", false)
 
 	const prefix = "openflux://import?data="
 	if !strings.HasPrefix(link, prefix) {
@@ -50,11 +50,14 @@ func TestBuildDeepLinkRoundTrips(t *testing.T) {
 	if _, present := payload["doc_urls"]; present {
 		t.Errorf("payload has doc_urls = %v, want it omitted for a non-multistream key", payload["doc_urls"])
 	}
+	if _, present := payload["e2e_encryption"]; present {
+		t.Errorf("payload has e2e_encryption = %v, want it omitted when off", payload["e2e_encryption"])
+	}
 }
 
 func TestBuildDeepLinkIncludesDocURLsForMultistream(t *testing.T) {
 	urls := []string{"https://docs.yandex.ru/a", "https://docs.yandex.ru/b"}
-	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "", urls, "yandex_multistream")
+	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "", urls, "yandex_multistream", false)
 
 	data := strings.TrimPrefix(link, "openflux://import?data=")
 	decoded, err := base64.RawURLEncoding.DecodeString(data)
@@ -74,5 +77,22 @@ func TestBuildDeepLinkIncludesDocURLsForMultistream(t *testing.T) {
 		if gotURLs[i] != u {
 			t.Errorf("payload[doc_urls][%d] = %v, want %v", i, gotURLs[i], u)
 		}
+	}
+}
+
+func TestBuildDeepLinkIncludesE2EEncryptionWhenOn(t *testing.T) {
+	link := buildDeepLink("https://example.com", "user-42", "of_key_abc", "https://docs.yandex.ru/x", nil, "yandex", true)
+
+	data := strings.TrimPrefix(link, "openflux://import?data=")
+	decoded, err := base64.RawURLEncoding.DecodeString(data)
+	if err != nil {
+		t.Fatalf("payload is not valid unpadded base64url: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if payload["e2e_encryption"] != true {
+		t.Errorf("payload[e2e_encryption] = %v, want true", payload["e2e_encryption"])
 	}
 }

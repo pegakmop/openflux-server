@@ -14,7 +14,10 @@ type createKeyRequest struct {
 	DocURL    string `json:"doc_url"`
 	// DocURLs is required instead of DocURL when Transport is
 	// "yandex_multistream" (2+ URLs) - see model.Key.DocURLs.
-	DocURLs           []string   `json:"doc_urls"`
+	DocURLs []string `json:"doc_urls"`
+	// E2EEncryption is the operator's default for the app's optional
+	// payload encryption - see model.Key.E2EEncryption.
+	E2EEncryption     bool       `json:"e2e_encryption"`
 	TrafficLimitBytes *int64     `json:"traffic_limit_bytes"`
 	OwnerRef          string     `json:"owner_ref"`
 	ExpiresAt         *time.Time `json:"expires_at"`
@@ -142,6 +145,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			Transport:         req.Transport,
 			DocURL:            req.DocURL,
 			DocURLs:           req.DocURLs,
+			E2EEncryption:     req.E2EEncryption,
 			TrafficLimitBytes: req.TrafficLimitBytes,
 			OwnerRef:          ownerRef,
 			ExpiresAt:         req.ExpiresAt,
@@ -154,7 +158,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		created = append(created, createdKey{
 			ID:       k.ID,
 			Token:    token,
-			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token, req.DocURL, req.DocURLs, req.Transport),
+			DeepLink: buildDeepLink(a.Config.PublicBaseURL, req.Label, token, req.DocURL, req.DocURLs, req.Transport, req.E2EEncryption),
 		})
 	}
 

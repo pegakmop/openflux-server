@@ -13,6 +13,7 @@ type resolveResponse struct {
 	DocURL            string   `json:"doc_url,omitempty"`
 	DocURLs           []string `json:"doc_urls,omitempty"`
 	Transport         string   `json:"transport,omitempty"`
+	E2EEncryption     bool     `json:"e2e_encryption,omitempty"`
 	BytesUsedTotal    int64    `json:"bytes_used_total"`
 	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 }
@@ -48,6 +49,7 @@ func (a *App) handleResolve(w http.ResponseWriter, r *http.Request) {
 		resp.DocURL = k.DocURL
 		resp.DocURLs = k.DocURLs
 		resp.Transport = k.Transport
+		resp.E2EEncryption = k.E2EEncryption
 	}
 
 	writeJSON(w, http.StatusOK, resp)

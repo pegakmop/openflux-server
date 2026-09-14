@@ -25,6 +25,7 @@ export interface KeyDTO {
 	DocURL: string;
 	// Set instead of DocURL for Transport "yandex_multistream" (2+ URLs).
 	DocURLs: string[] | null;
+	E2EEncryption: boolean;
 	AssignedNodeID: string | null;
 	Enabled: boolean;
 	TrafficLimitBytes: number | null;
@@ -191,6 +192,7 @@ export const api = {
 		doc_url?: string;
 		doc_urls?: string[];
 		transport?: string;
+		e2e_encryption?: boolean;
 		traffic_limit_bytes?: number;
 		owner_ref?: string;
 	}) => request<CreateKeyResult>('POST', '/v1/admin/keys', body),

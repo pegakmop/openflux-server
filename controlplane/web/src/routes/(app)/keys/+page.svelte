@@ -54,6 +54,7 @@
 	let docUrl = $state('');
 	let docUrls = $state('');
 	let transport = $state('yandex');
+	let e2eEncryption = $state(false);
 	let limitGb = $state('');
 	let ownerRef = $state('');
 	let creating = $state(false);
@@ -137,6 +138,7 @@
 				doc_url: isMultistream ? undefined : docUrl.trim(),
 				doc_urls: isMultistream ? parsedDocUrls : undefined,
 				transport: transport || undefined,
+				e2e_encryption: e2eEncryption,
 				traffic_limit_bytes: gbToBytes(limitGb),
 				owner_ref: ownerRef.trim() || undefined
 			});
@@ -146,6 +148,7 @@
 			docUrls = '';
 			ownerRef = '';
 			limitGb = '';
+			e2eEncryption = false;
 			await loadKeys();
 		} catch (e) {
 			createError = errText(e);
@@ -290,6 +293,10 @@
 			<label class="block">
 				<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.limitGb')}</span>
 				<input class="input" type="number" min="0" step="0.1" bind:value={limitGb} />
+			</label>
+			<label class="flex items-end gap-2 pb-2">
+				<input type="checkbox" class="h-4 w-4" bind:checked={e2eEncryption} />
+				<span class="text-xs font-medium text-[var(--of-muted)]">{t('keys.e2e')}</span>
 			</label>
 			<label class="block sm:col-span-2 lg:col-span-2">
 				<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.owner')}</span>

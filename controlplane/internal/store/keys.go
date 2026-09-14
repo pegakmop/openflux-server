@@ -20,6 +20,7 @@ type CreateKeyParams struct {
 	// DocURLs is set instead of DocURL for the yandex_multistream transport
 	// (2+ URLs) - see model.Key.DocURLs.
 	DocURLs           []string
+	E2EEncryption     bool
 	TrafficLimitBytes *int64
 	OwnerRef          string
 	ExpiresAt         *time.Time
@@ -28,14 +29,14 @@ type CreateKeyParams struct {
 func scanKey(row pgx.Row) (model.Key, error) {
 	var k model.Key
 	err := row.Scan(
-		&k.ID, &k.Label, &k.Transport, &k.DocURL, &k.DocURLs, &k.AssignedNodeID, &k.Enabled,
+		&k.ID, &k.Label, &k.Transport, &k.DocURL, &k.DocURLs, &k.E2EEncryption, &k.AssignedNodeID, &k.Enabled,
 		&k.TrafficLimitBytes, &k.BytesSentTotal, &k.BytesReceivedTotal, &k.OwnerRef,
 		&k.ExpiresAt, &k.CreatedAt, &k.UpdatedAt, &k.LastSeenAt,
 	)
 	return k, err
 }
 
-const keyColumns = `id, label, transport, doc_url, doc_urls, assigned_node_id, enabled,
+const keyColumns = `id, label, transport, doc_url, doc_urls, e2e_encryption, assigned_node_id, enabled,
 	traffic_limit_bytes, bytes_sent_total, bytes_received_total, owner_ref,
 	expires_at, created_at, updated_at, last_seen_at`
 
@@ -56,10 +57,10 @@ func (s *Store) CreateKey(ctx context.Context, p CreateKeyParams) (model.Key, er
 			ORDER BY count(k.id) ASC
 			LIMIT 1
 		)
-		INSERT INTO keys (token_hash, token_enc, label, transport, doc_url, doc_urls, traffic_limit_bytes, owner_ref, expires_at, assigned_node_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT id FROM candidate))
+		INSERT INTO keys (token_hash, token_enc, label, transport, doc_url, doc_urls, e2e_encryption, traffic_limit_bytes, owner_ref, expires_at, assigned_node_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM candidate))
 		RETURNING `+keyColumns,
-		p.TokenHash, p.TokenEnc, p.Label, p.Transport, p.DocURL, p.DocURLs, p.TrafficLimitBytes, p.OwnerRef, p.ExpiresAt)
+		p.TokenHash, p.TokenEnc, p.Label, p.Transport, p.DocURL, p.DocURLs, p.E2EEncryption, p.TrafficLimitBytes, p.OwnerRef, p.ExpiresAt)
 
 	return scanKey(row)
 }

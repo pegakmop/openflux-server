@@ -24,7 +24,7 @@ import (
 // deep link whose control_url doesn't actually resolve to this server isn't
 // useful to hand out, so callers should treat "" as "omit it" rather than
 // including a broken link.
-func buildDeepLink(publicBaseURL, label, keyToken, docURL string, docURLs []string, transportName string) string {
+func buildDeepLink(publicBaseURL, label, keyToken, docURL string, docURLs []string, transportName string, e2eEncryption bool) string {
 	if publicBaseURL == "" {
 		return ""
 	}
@@ -42,6 +42,13 @@ func buildDeepLink(publicBaseURL, label, keyToken, docURL string, docURLs []stri
 	// this key at all when present (org.openflux.app.data.ProfileDeepLink).
 	if len(docURLs) > 0 {
 		payload["doc_urls"] = docURLs
+	}
+	// Omitted rather than sent as false: the app's decoder already defaults
+	// e2e_encryption to off (optBoolean("e2e_encryption", false)), and
+	// leaving it out for the common case keeps the payload the same size it
+	// was before this field existed.
+	if e2eEncryption {
+		payload["e2e_encryption"] = true
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

@@ -77,6 +77,7 @@ export const ru = {
 	'keys.docUrls': 'Ссылки на Yandex Docs (2+, по одной на строку)',
 	'keys.docUrlsPh': 'https://docs.yandex.ru/a\nhttps://docs.yandex.ru/b',
 	'keys.transport': 'Транспорт',
+	'keys.e2e': 'E2E-шифрование трафика',
 	'keys.limitGb': 'Лимит трафика, ГБ (пусто = без лимита)',
 	'keys.limitGbShort': 'Лимит, ГБ',
 	'keys.owner': 'Владелец (необязательно)',
