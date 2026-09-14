@@ -3,6 +3,7 @@ package transport
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"sync/atomic"
 
@@ -40,9 +41,26 @@ type EncryptedTransport struct {
 // needed). isExitNode both picks which derived key is "ours to send with"
 // and enables the auto-detect fallback described above.
 func NewEncryptedTransport(inner Transport, token string, isExitNode bool) *EncryptedTransport {
+	return newEncryptedTransport(inner, token, isExitNode, "")
+}
+
+// NewEncryptedTransportForStream is NewEncryptedTransport for one stream of
+// a MultiStreamTransport: each stream gets its own key, derived with the
+// stream's index folded into the HKDF info string, rather than sharing one
+// key across streams with independent nonce counters - two streams could
+// otherwise both send their own "packet #1" under the same key, reusing a
+// nonce (see EncryptedTransport's doc comment on why that must never
+// happen). streamIndex 0 here deliberately does NOT match plain
+// NewEncryptedTransport's key - a multi-stream and a single-stream peer are
+// never meant to talk to each other.
+func NewEncryptedTransportForStream(inner Transport, token string, isExitNode bool, streamIndex int) *EncryptedTransport {
+	return newEncryptedTransport(inner, token, isExitNode, fmt.Sprintf(" stream %d", streamIndex))
+}
+
+func newEncryptedTransport(inner Transport, token string, isExitNode bool, infoSuffix string) *EncryptedTransport {
 	base := sha256.Sum256([]byte(token))
-	c2s := deriveKey(base[:], "openflux c2s")
-	s2c := deriveKey(base[:], "openflux s2c")
+	c2s := deriveKey(base[:], "openflux c2s"+infoSuffix)
+	s2c := deriveKey(base[:], "openflux s2c"+infoSuffix)
 
 	e := &EncryptedTransport{Transport: inner, autoDetect: isExitNode}
 	if isExitNode {

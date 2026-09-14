@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"universal-bypass-tool/nodeagent"
 	"universal-bypass-tool/socks5"
@@ -38,6 +39,7 @@ func main() {
 	controlURL := flag.String("control-url", "", "Managed mode: base URL of the openflux-control service")
 	nodeToken := flag.String("node-token", "", "Managed mode: this node's bearer token from controlplane")
 	flag.StringVar(&globalDocUrl, "url", "http://#", "Document URL. If u use Yandex.Docs transport")
+	docUrls := flag.String("urls", "", "Comma-separated doc URLs for --transport yandex_multistream (2+ required, same list on both ends)")
 	flag.StringVar(&maxToken, "maxToken", "", "MAX call user id. If u use MAX transport")
 	flag.StringVar(&maxUid, "maxUid", "", "MAX Web token. If u use MAX transport")
 	flag.Parse()
@@ -85,6 +87,16 @@ func main() {
 	case "oneme":
 		uidint, _ := strconv.ParseInt(maxUid, 10, 64)
 		trans = transport.NewCompressedTransport(oneme.NewOneMeTransport(*exitNode, maxToken, uidint, config))
+	case "yandex_multistream":
+		urls := strings.Split(*docUrls, ",")
+		if len(urls) < 2 {
+			log.Fatalf("--transport yandex_multistream requires --urls with 2+ comma-separated doc URLs")
+		}
+		streams := make([]transport.Transport, len(urls))
+		for i, url := range urls {
+			streams[i] = transport.NewCompressedTransport(yandex.NewYandexDocsTransport(strings.TrimSpace(url), config))
+		}
+		trans = transport.NewMultiStreamTransport(streams)
 	default:
 		log.Fatalf("Unknown transport type: %s", *transportType)
 	}

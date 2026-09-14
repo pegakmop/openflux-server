@@ -79,10 +79,20 @@ type Protector interface {
 type Config struct {
 	Mode string `json:"mode"` // must be "manual" - see buildTransport
 
-	Transport string `json:"transport"` // "yandex" (default), "volga", or "max"
+	Transport string `json:"transport"` // "yandex" (default), "volga", "max", or "yandex_multistream"
 	DocURL    string `json:"doc_url"`   // yandex, volga
 	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
 	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
+
+	// DocURLs is yandex_multistream's doc_url: one independent Yandex Docs
+	// session per entry (2+ required), each a full real TCP connection of
+	// its own - see transport.MultiStreamTransport for why this raises the
+	// throughput ceiling a single session runs into, and what it doesn't
+	// (a single real connection through the tunnel still rides just one of
+	// these). The exit node this pairs with must be given the exact same
+	// list, in any order - each side hashes packets to a stream
+	// independently, with no coordination between them.
+	DocURLs []string `json:"doc_urls,omitempty"`
 
 	// KeyToken, when set, also becomes the ChaCha20-Poly1305 key encrypting
 	// tunnel payloads end-to-end (client<->exit node) - see
@@ -157,16 +167,17 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	notify(cb, "connecting")
 
 	transportConfig := transport.DefaultConfig()
-	inner, err := buildTransport(cfg, transportConfig)
+	trans, wrapped, err := buildTransport(cfg, transportConfig)
 	if err != nil {
 		return fail(cb, err)
 	}
 
-	var trans transport.Transport = inner
-	if cfg.KeyToken != "" {
-		trans = transport.NewEncryptedTransport(trans, cfg.KeyToken, false)
+	if !wrapped {
+		if cfg.KeyToken != "" {
+			trans = transport.NewEncryptedTransport(trans, cfg.KeyToken, false)
+		}
+		trans = transport.NewCompressedTransport(trans)
 	}
-	trans = transport.NewCompressedTransport(trans)
 	trans.SetEventCallback(func(code, detail string) {
 		if cb != nil {
 			cb.OnLogEvent(code, detail)
@@ -226,12 +237,14 @@ func StopTunnel() error {
 	return nil
 }
 
-// buildTransport picks and constructs the concrete transport for cfg,
-// without starting it - StartTunnel wraps the result (compression, event
-// callback) before calling Start.
-func buildTransport(cfg Config, transportConfig transport.TransportConfig) (transport.Transport, error) {
+// buildTransport picks and constructs the transport for cfg. wrapped
+// reports whether it already carries its own compression/encryption
+// (yandex_multistream does this per-stream, see below) - StartTunnel skips
+// its own wrapping when true, since a second layer on top would just
+// compress/encrypt an already-compressed/encrypted blob.
+func buildTransport(cfg Config, transportConfig transport.TransportConfig) (trans transport.Transport, wrapped bool, err error) {
 	if cfg.Mode != "manual" {
-		return nil, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
+		return nil, false, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
 	}
 
 	t := cfg.Transport
@@ -241,21 +254,34 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 	switch t {
 	case "yandex":
 		if cfg.DocURL == "" {
-			return nil, fmt.Errorf("doc_url is required")
+			return nil, false, fmt.Errorf("doc_url is required")
 		}
-		return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), nil
+		return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), false, nil
 	case "volga":
 		if cfg.DocURL == "" {
-			return nil, fmt.Errorf("doc_url is required")
+			return nil, false, fmt.Errorf("doc_url is required")
 		}
-		return yandex.NewYandexVolgaTransport(cfg.DocURL, transportConfig), nil
+		return yandex.NewYandexVolgaTransport(cfg.DocURL, transportConfig), false, nil
 	case "max":
 		if cfg.MaxToken == "" || cfg.MaxUID == 0 {
-			return nil, fmt.Errorf("the max transport requires max_token and max_uid")
+			return nil, false, fmt.Errorf("the max transport requires max_token and max_uid")
 		}
-		return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), nil
+		return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), false, nil
+	case "yandex_multistream":
+		if len(cfg.DocURLs) < 2 {
+			return nil, false, fmt.Errorf("yandex_multistream requires at least 2 doc_urls")
+		}
+		streams := make([]transport.Transport, len(cfg.DocURLs))
+		for i, url := range cfg.DocURLs {
+			var st transport.Transport = yandex.NewYandexDocsTransport(url, transportConfig)
+			if cfg.KeyToken != "" {
+				st = transport.NewEncryptedTransportForStream(st, cfg.KeyToken, false, i)
+			}
+			streams[i] = transport.NewCompressedTransport(st)
+		}
+		return transport.NewMultiStreamTransport(streams), true, nil
 	default:
-		return nil, fmt.Errorf("unsupported transport %q for this client", t)
+		return nil, false, fmt.Errorf("unsupported transport %q for this client", t)
 	}
 }
 

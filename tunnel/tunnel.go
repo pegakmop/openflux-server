@@ -43,12 +43,22 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 
+	// Max bounds the TCP window, which caps throughput at
+	// Max*8/RTT regardless of everything else - and this tunnel's RTT is
+	// regularly 200-400ms (real network hop + covert channel relay each
+	// way, see the minRTO comment below), not the sub-10ms a real NIC gets
+	// tuned for. The old 1MB max capped a single connection to roughly
+	// 25-30 Mbit/s at that RTT purely from window exhaustion, with CPU/RAM
+	// nowhere near the limit. 8MB covers the bandwidth-delay product for a
+	// 100+ Mbit/s connection at that RTT; the cost is just backing memory
+	// per open connection, negligible next to the throughput this removes
+	// as a hard ceiling.
 	if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
-		&tcpip.TCPReceiveBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
+		&tcpip.TCPReceiveBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 8 * 1024 * 1024}); err != nil {
 		utils.Debugf("[TUNNEL] Failed to set recv buffer: %v", err)
 	}
 	if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber,
-		&tcpip.TCPSendBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 1048576}); err != nil {
+		&tcpip.TCPSendBufferSizeRangeOption{Min: 65536, Default: 262144, Max: 8 * 1024 * 1024}); err != nil {
 		utils.Debugf("[TUNNEL] Failed to set send buffer: %v", err)
 	}
 	// gvisor's default MinRTO (200ms, tuned for a real NIC) is far shorter
