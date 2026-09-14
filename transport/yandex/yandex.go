@@ -37,13 +37,21 @@ import (
 // Volga batches multiple packets into one relay HTTP POST.
 //
 // batchMarker prefixes a batched payload's first byte so a peer can tell it
-// apart from a lone compressed packet from a not-yet-updated build: the
-// compression layer (transport/compressor.go) only ever emits 0x00
-// (stored) or 0x1F (LZ4) as its own first byte, so 0xFE can never collide
-// with a real single-packet payload - mixing an updated and a
-// not-yet-updated peer during a rollout degrades to today's one-packet-per-
-// message behavior instead of misparsing either side's data.
+// apart from a lone compressed packet: compress() only ever emits 0x00
+// (stored) or 0x1F (LZ4) as its own first byte, so 0xFE never collides with
+// a real single-packet payload. That only covers RECEIVING from a mixed-
+// version peer, though - see kaBatchCapabilityToken for why sending is
+// gated separately.
 const batchMarker = 0xFE
+
+// kaBatchCapabilityToken rides inside the keepalive to tell a peer "my code
+// understands batchMarker" before ever sending it one. Without this, a
+// build that unconditionally batches breaks a not-yet-updated peer in
+// EITHER role - its own receive path has no batchMarker check at all, so a
+// batched frame just fails to decompress. Peer capability, not which role
+// this transport plays (client vs exit node), is what writerLoop's flush
+// gates sending on - see peerBatches.
+const kaBatchCapabilityToken = "+batch1"
 
 const (
 	ydocsBatchSize     = 20
@@ -136,6 +144,14 @@ type YandexDocsTransport struct {
 	// backend expects.
 	recentSentMu sync.Mutex
 	recentSent   map[uint32]time.Time
+
+	// peerBatches is learned from the peer's own keepalive (see
+	// kaBatchCapabilityToken) - only once we know the peer's code
+	// recognizes batchMarker do we send it batched frames, so a build
+	// running against a not-yet-updated peer (or vice versa) keeps using
+	// the legacy one-packet-per-message format instead of sending
+	// something the other side can't parse.
+	peerBatches atomic.Bool
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
@@ -429,7 +445,13 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 		if len(batch) == 0 {
 			return
 		}
-		t.sendBatch(session, batch)
+		if t.peerBatches.Load() {
+			t.sendBatch(session, batch)
+		} else {
+			for _, pkt := range batch {
+				t.sendSingle(session, pkt)
+			}
+		}
 		batch = batch[:0]
 		totalBytes = 0
 	}
@@ -507,6 +529,24 @@ func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 	}
 }
 
+// sendSingle is sendBatch without the batchMarker framing - the exact
+// one-packet-per-message format from before batching existed, used until
+// the peer's keepalive proves it understands batched frames (see
+// peerBatches).
+func (t *YandexDocsTransport) sendSingle(session *DocSession, packet []byte) {
+	t.markSent(packet)
+	if utils.IsVerbose() {
+		utils.Debugf("[YDOCS] -> %d bytes (unbatched)\n", len(packet))
+	}
+
+	payload := base64.StdEncoding.EncodeToString(packet)
+	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+
+	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+		utils.Debugf("[YDOCS] Write error: %v", err)
+	}
+}
+
 // markSent records that data was just sent, so a later self-echo of it
 // arriving back through handleMessage can be recognized and dropped - see
 // YandexDocsTransport.recentSent's doc comment. Entries expire on their own
@@ -552,7 +592,11 @@ func (t *YandexDocsTransport) wasRecentlySent(data []byte) bool {
 func (t *YandexDocsTransport) keepAliveLoop() {
 	ticker := time.NewTicker(t.GetConfig().KeepAliveInterval)
 	defer ticker.Stop()
-	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---"}]`
+	// The trailing token rides inside the existing "---KA---" keepalive
+	// (still an exact substring, so a not-yet-updated peer's own
+	// strings.Contains(text, "---KA---") still matches and ignores it same
+	// as always) - see peerBatches and kaBatchCapabilityToken.
+	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---` + kaBatchCapabilityToken + `"}]`
 
 	for t.IsRunning() {
 		<-ticker.C
@@ -578,6 +622,9 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 	text := string(data)
 
 	if strings.Contains(text, "---KA---") {
+		if strings.Contains(text, kaBatchCapabilityToken) {
+			t.peerBatches.Store(true)
+		}
 		return
 	}
 

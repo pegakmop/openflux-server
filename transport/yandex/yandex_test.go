@@ -204,6 +204,9 @@ func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	tr.SetConnected(true)
+	// Batching only ever turns on once the peer's own keepalive has proven
+	// it understands batchMarker - see peerBatches.
+	tr.peerBatches.Store(true)
 	queue := make(chan []byte, 10)
 	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
 
@@ -238,6 +241,79 @@ func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("server never received the batched message")
+	}
+}
+
+// TestWriterLoopDoesNotBatchByDefault guards the actual compatibility fix:
+// without proof the peer understands batchMarker, packets must go out one
+// per message in the pre-batching format, or a not-yet-updated peer (in
+// either role) can't parse them at all.
+func TestWriterLoopDoesNotBatchByDefault(t *testing.T) {
+	received := make(chan []byte, 10)
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			received <- msg
+		}
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	if err := tr.BaseTransport.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tr.SetConnected(true)
+	queue := make(chan []byte, 10)
+	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
+
+	go tr.writerLoop(queue)
+
+	want := [][]byte{[]byte("aaa"), []byte("bb")}
+	for _, p := range want {
+		queue <- p
+	}
+
+	for i, w := range want {
+		select {
+		case msg := <-received:
+			base64Str := tr.extractBase64String(string(msg))
+			decoded, err := base64.StdEncoding.DecodeString(base64Str)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(decoded) > 0 && decoded[0] == batchMarker {
+				t.Fatalf("packet %d went out batched with no peer capability proven", i)
+			}
+			if string(decoded) != string(w) {
+				t.Errorf("packet %d = %q, want %q", i, decoded, w)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("server never received packet %d", i)
+		}
+	}
+}
+
+// TestHandleMessageLearnsPeerBatchingFromKeepalive is the other half of the
+// fix: a keepalive carrying kaBatchCapabilityToken must set peerBatches,
+// while a legacy "---KA---" with nothing extra (what a not-yet-updated peer
+// actually sends) must not.
+func TestHandleMessageLearnsPeerBatchingFromKeepalive(t *testing.T) {
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+
+	tr.handleMessage(nil, []byte(`42["message",{"type":"cursor","cursor":"18;---KA---"}]`))
+	if tr.peerBatches.Load() {
+		t.Fatalf("peerBatches = true after a legacy keepalive with no capability token")
+	}
+
+	tr.handleMessage(nil, []byte(`42["message",{"type":"cursor","cursor":"18;---KA---`+kaBatchCapabilityToken+`"}]`))
+	if !tr.peerBatches.Load() {
+		t.Fatalf("peerBatches = false after a keepalive carrying kaBatchCapabilityToken")
 	}
 }
 

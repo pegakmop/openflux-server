@@ -93,11 +93,14 @@ type Config struct {
 	// sessions. The exit node needs the exact same list, any order.
 	DocURLs []string `json:"doc_urls,omitempty"`
 
-	// KeyToken, when set, also becomes the ChaCha20-Poly1305 key encrypting
-	// tunnel payloads end-to-end (client<->exit node) - see
-	// transport.NewEncryptedTransport. Blank means unencrypted, today's
-	// behavior.
 	KeyToken string `json:"key_token,omitempty"`
+
+	// E2EEncryption + a non-blank KeyToken wraps the transport in
+	// transport.NewEncryptedTransport. Kept separate from "KeyToken is
+	// non-blank" - KeyToken is already carried by every KEY-mode profile
+	// for unrelated reasons, and the client has no fallback if it encrypts
+	// against an exit node that can't (only the exit node auto-detects).
+	E2EEncryption bool `json:"e2e_encryption,omitempty"`
 
 	// MTU is informational here - the caller applies it to the Android
 	// VpnService.Builder itself before opening the TUN fd.
@@ -188,7 +191,7 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	}
 
 	if !wrapped {
-		if cfg.KeyToken != "" {
+		if cfg.E2EEncryption && cfg.KeyToken != "" {
 			trans = transport.NewEncryptedTransport(trans, cfg.KeyToken, false)
 		}
 		trans = transport.NewCompressedTransport(trans)
@@ -289,7 +292,7 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 		streams := make([]transport.Transport, len(cfg.DocURLs))
 		for i, url := range cfg.DocURLs {
 			var st transport.Transport = yandex.NewYandexDocsTransport(url, transportConfig)
-			if cfg.KeyToken != "" {
+			if cfg.E2EEncryption && cfg.KeyToken != "" {
 				st = transport.NewEncryptedTransportForStream(st, cfg.KeyToken, false, i)
 			}
 			streams[i] = transport.NewCompressedTransport(st)

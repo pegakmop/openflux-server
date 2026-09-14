@@ -91,6 +91,9 @@ func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
 }
 
 func TestBuildTransportMultiStream(t *testing.T) {
+	// KeyToken set but E2EEncryption left false (default): must still build
+	// successfully without encrypting - see E2EEncryption's doc comment on
+	// why a bare KeyToken alone must never turn encryption on.
 	cfg := Config{
 		Mode:      "manual",
 		Transport: "yandex_multistream",
@@ -103,6 +106,26 @@ func TestBuildTransportMultiStream(t *testing.T) {
 	}
 	if !wrapped {
 		t.Errorf("yandex_multistream should report itself as already wrapped (it builds its own per-stream compression/encryption)")
+	}
+	if _, ok := trans.(*transport.MultiStreamTransport); !ok {
+		t.Errorf("got %T, want *transport.MultiStreamTransport", trans)
+	}
+}
+
+func TestBuildTransportMultiStreamWithE2EEncryption(t *testing.T) {
+	cfg := Config{
+		Mode:          "manual",
+		Transport:     "yandex_multistream",
+		DocURLs:       []string{"https://docs.yandex.ru/a", "https://docs.yandex.ru/b"},
+		KeyToken:      "shared-secret-token",
+		E2EEncryption: true,
+	}
+	trans, wrapped, err := buildTransport(cfg, transport.DefaultConfig())
+	if err != nil {
+		t.Fatalf("buildTransport: %v", err)
+	}
+	if !wrapped {
+		t.Errorf("wrapped = false, want true")
 	}
 	if _, ok := trans.(*transport.MultiStreamTransport); !ok {
 		t.Errorf("got %T, want *transport.MultiStreamTransport", trans)
