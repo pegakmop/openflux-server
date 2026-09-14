@@ -37,3 +37,34 @@ func TestHasherDeterministicAndPepperSensitive(t *testing.T) {
 		t.Fatalf("different tokens should not collide")
 	}
 }
+
+func TestTokenCipherRoundTrip(t *testing.T) {
+	c, err := NewTokenCipher("pepper-a")
+	if err != nil {
+		t.Fatalf("NewTokenCipher: %v", err)
+	}
+	enc, err := c.Encrypt("key_abc123")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, err := c.Decrypt(enc)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if got != "key_abc123" {
+		t.Errorf("Decrypt = %q, want %q", got, "key_abc123")
+	}
+}
+
+func TestTokenCipherWrongPepperFails(t *testing.T) {
+	c1, _ := NewTokenCipher("pepper-a")
+	c2, _ := NewTokenCipher("pepper-b")
+
+	enc, err := c1.Encrypt("secret")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := c2.Decrypt(enc); err == nil {
+		t.Errorf("expected decryption with the wrong pepper to fail")
+	}
+}

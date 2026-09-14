@@ -179,8 +179,13 @@ func (a *App) handleRotateKeyToken(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, "token generation failed", err)
 		return
 	}
+	tokenEnc, err := a.Cipher.Encrypt(token)
+	if err != nil {
+		writeInternalError(w, r, "token encryption failed", err)
+		return
+	}
 
-	k, err := a.Store.RotateKeyToken(r.Context(), id, a.Hasher.Hash(token))
+	k, err := a.Store.RotateKeyToken(r.Context(), id, a.Hasher.Hash(token), tokenEnc)
 	if err == store.ErrNotFound {
 		writeError(w, http.StatusNotFound, "key not found")
 		return

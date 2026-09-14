@@ -104,9 +104,15 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			writeInternalError(w, r, "token generation failed", err)
 			return
 		}
+		tokenEnc, err := a.Cipher.Encrypt(token)
+		if err != nil {
+			writeInternalError(w, r, "token encryption failed", err)
+			return
+		}
 
 		k, err := a.Store.CreateKey(r.Context(), store.CreateKeyParams{
 			TokenHash:         a.Hasher.Hash(token),
+			TokenEnc:          tokenEnc,
 			Label:             req.Label,
 			Transport:         req.Transport,
 			DocURL:            req.DocURL,

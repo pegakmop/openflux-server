@@ -34,6 +34,11 @@ type RemoteKey struct {
 	Transport         string `json:"transport"`
 	TrafficLimitBytes *int64 `json:"traffic_limit_bytes,omitempty"`
 	BytesUsedTotal    int64  `json:"bytes_used_total"`
+	// Token, when set, is the raw key token - the client uses it as the
+	// end-to-end encryption key (see transport.NewEncryptedTransport), so
+	// this worker needs the same value to derive matching keys. Empty for
+	// a key created before that existed; the worker just runs unencrypted.
+	Token string `json:"token,omitempty"`
 }
 
 func (c *ControlClient) ListKeys(ctx context.Context) ([]RemoteKey, error) {

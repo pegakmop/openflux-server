@@ -14,14 +14,16 @@ import (
 type App struct {
 	Store   *store.Store
 	Hasher  auth.Hasher
+	Cipher  auth.TokenCipher
 	Config  config.Config
 	limiter *ipRateLimiter
 }
 
-func NewApp(st *store.Store, hasher auth.Hasher, cfg config.Config) *App {
+func NewApp(st *store.Store, hasher auth.Hasher, cipher auth.TokenCipher, cfg config.Config) *App {
 	return &App{
 		Store:   st,
 		Hasher:  hasher,
+		Cipher:  cipher,
 		Config:  cfg,
 		limiter: newIPRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
 	}

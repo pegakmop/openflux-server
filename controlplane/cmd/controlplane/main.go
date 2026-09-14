@@ -34,7 +34,11 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	app := api.NewApp(store.New(pool), auth.NewHasher(cfg.TokenPepper), cfg)
+	cipher, err := auth.NewTokenCipher(cfg.TokenPepper)
+	if err != nil {
+		log.Fatalf("token cipher: %v", err)
+	}
+	app := api.NewApp(store.New(pool), auth.NewHasher(cfg.TokenPepper), cipher, cfg)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

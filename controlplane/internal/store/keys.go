@@ -13,6 +13,7 @@ import (
 
 type CreateKeyParams struct {
 	TokenHash         string
+	TokenEnc          []byte
 	Label             string
 	Transport         string
 	DocURL            string
@@ -52,10 +53,10 @@ func (s *Store) CreateKey(ctx context.Context, p CreateKeyParams) (model.Key, er
 			ORDER BY count(k.id) ASC
 			LIMIT 1
 		)
-		INSERT INTO keys (token_hash, label, transport, doc_url, traffic_limit_bytes, owner_ref, expires_at, assigned_node_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT id FROM candidate))
+		INSERT INTO keys (token_hash, token_enc, label, transport, doc_url, traffic_limit_bytes, owner_ref, expires_at, assigned_node_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, (SELECT id FROM candidate))
 		RETURNING `+keyColumns,
-		p.TokenHash, p.Label, p.Transport, p.DocURL, p.TrafficLimitBytes, p.OwnerRef, p.ExpiresAt)
+		p.TokenHash, p.TokenEnc, p.Label, p.Transport, p.DocURL, p.TrafficLimitBytes, p.OwnerRef, p.ExpiresAt)
 
 	return scanKey(row)
 }
@@ -84,11 +85,28 @@ func (s *Store) GetKeyByID(ctx context.Context, id string) (model.Key, error) {
 	return k, nil
 }
 
+// NodeKey is a key as its assigned exit node sees it - a narrower shape
+// than model.Key because it includes TokenEnc, the encrypted raw token
+// (see auth.TokenCipher) a node needs to derive the same end-to-end
+// encryption key the client did. Keeping this separate from model.Key
+// means nothing else that touches the general key model (the admin API,
+// the web panel) has any path to that field at all.
+type NodeKey struct {
+	ID                 string
+	DocURL             string
+	Transport          string
+	TrafficLimitBytes  *int64
+	BytesSentTotal     int64
+	BytesReceivedTotal int64
+	TokenEnc           []byte
+}
+
 // ListActiveKeysForNode returns the enabled keys currently assigned to a
 // node - this is what the exit node's poll loop consumes.
-func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]model.Key, error) {
+func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]NodeKey, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+keyColumns+` FROM keys
+		SELECT id, doc_url, transport, traffic_limit_bytes, bytes_sent_total, bytes_received_total, token_enc
+		FROM keys
 		WHERE assigned_node_id = $1 AND enabled = true
 		ORDER BY created_at
 	`, nodeID)
@@ -97,10 +115,11 @@ func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]mod
 	}
 	defer rows.Close()
 
-	var out []model.Key
+	var out []NodeKey
 	for rows.Next() {
-		k, err := scanKey(rows)
-		if err != nil {
+		var k NodeKey
+		if err := rows.Scan(&k.ID, &k.DocURL, &k.Transport, &k.TrafficLimitBytes,
+			&k.BytesSentTotal, &k.BytesReceivedTotal, &k.TokenEnc); err != nil {
 			return nil, fmt.Errorf("scan node key: %w", err)
 		}
 		out = append(out, k)
@@ -181,10 +200,10 @@ func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) erro
 // leaving every other field (label, doc_url, traffic limit, owner_ref,
 // usage stats) untouched - for when the raw token from creation is gone
 // (it's only ever stored hashed) but the key itself should keep working.
-func (s *Store) RotateKeyToken(ctx context.Context, id, newTokenHash string) (model.Key, error) {
+func (s *Store) RotateKeyToken(ctx context.Context, id, newTokenHash string, newTokenEnc []byte) (model.Key, error) {
 	row := s.pool.QueryRow(ctx, `
-		UPDATE keys SET token_hash = $1, updated_at = now() WHERE id = $2
-		RETURNING `+keyColumns, newTokenHash, id)
+		UPDATE keys SET token_hash = $1, token_enc = $2, updated_at = now() WHERE id = $3
+		RETURNING `+keyColumns, newTokenHash, newTokenEnc, id)
 	k, err := scanKey(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Key{}, ErrNotFound

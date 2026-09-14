@@ -207,7 +207,11 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		return nil, fmt.Errorf("no port range capacity left on this node")
 	}
 
-	trans := transport.NewCompressedTransport(yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig()))
+	var trans transport.Transport = yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig())
+	if k.Token != "" {
+		trans = transport.NewEncryptedTransport(trans, k.Token, true)
+	}
+	trans = transport.NewCompressedTransport(trans)
 	if err := trans.Start(); err != nil {
 		o.ports.release(portIdx)
 		return nil, err

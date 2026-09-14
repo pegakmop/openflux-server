@@ -84,6 +84,12 @@ type Config struct {
 	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
 	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
 
+	// KeyToken, when set, also becomes the ChaCha20-Poly1305 key encrypting
+	// tunnel payloads end-to-end (client<->exit node) - see
+	// transport.NewEncryptedTransport. Blank means unencrypted, today's
+	// behavior.
+	KeyToken string `json:"key_token,omitempty"`
+
 	// MTU is informational here - the caller applies it to the Android
 	// VpnService.Builder itself before opening the TUN fd.
 	MTU         int    `json:"mtu"`
@@ -156,7 +162,11 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 		return fail(cb, err)
 	}
 
-	trans := transport.NewCompressedTransport(inner)
+	var trans transport.Transport = inner
+	if cfg.KeyToken != "" {
+		trans = transport.NewEncryptedTransport(trans, cfg.KeyToken, false)
+	}
+	trans = transport.NewCompressedTransport(trans)
 	trans.SetEventCallback(func(code, detail string) {
 		if cb != nil {
 			cb.OnLogEvent(code, detail)

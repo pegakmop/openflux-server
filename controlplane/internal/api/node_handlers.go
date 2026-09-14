@@ -13,6 +13,12 @@ type nodeKeyResponse struct {
 	Transport         string `json:"transport"`
 	TrafficLimitBytes *int64 `json:"traffic_limit_bytes,omitempty"`
 	BytesUsedTotal    int64  `json:"bytes_used_total"`
+	// Token is the raw key token, decrypted here (only a node-authenticated
+	// request reaches this handler at all) so the assigned worker can derive
+	// the same end-to-end encryption key the client used - see
+	// transport.NewEncryptedTransport. Empty for a key created before this
+	// existed (token_enc is null); such a key just runs unencrypted.
+	Token string `json:"token,omitempty"`
 }
 
 func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
@@ -26,12 +32,19 @@ func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]nodeKeyResponse, 0, len(keys))
 	for _, k := range keys {
+		var token string
+		if len(k.TokenEnc) > 0 {
+			if t, err := a.Cipher.Decrypt(k.TokenEnc); err == nil {
+				token = t
+			}
+		}
 		out = append(out, nodeKeyResponse{
 			ID:                k.ID,
 			DocURL:            k.DocURL,
 			Transport:         k.Transport,
 			TrafficLimitBytes: k.TrafficLimitBytes,
-			BytesUsedTotal:    k.BytesUsedTotal(),
+			BytesUsedTotal:    k.BytesSentTotal + k.BytesReceivedTotal,
+			Token:             token,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

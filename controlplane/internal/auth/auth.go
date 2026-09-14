@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -40,6 +42,49 @@ func NewHasher(pepper string) Hasher {
 func (h Hasher) Hash(token string) string {
 	sum := sha256.Sum256(append([]byte(token), h.pepper...))
 	return hex.EncodeToString(sum[:])
+}
+
+// TokenCipher reversibly encrypts a key's raw token so it can be handed back
+// to that key's assigned exit node later (for end-to-end payload
+// encryption - see transport.EncryptedTransport) without storing the token
+// itself in the clear. Domain-separated from Hasher's pepper use via SHA-256
+// so the two derived secrets don't collide even though both start from the
+// same pepper.
+type TokenCipher struct {
+	gcm cipher.AEAD
+}
+
+func NewTokenCipher(pepper string) (TokenCipher, error) {
+	key := sha256.Sum256(append([]byte("token-cipher:"), pepper...))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return TokenCipher{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return TokenCipher{}, err
+	}
+	return TokenCipher{gcm: gcm}, nil
+}
+
+func (c TokenCipher) Encrypt(token string) ([]byte, error) {
+	nonce := make([]byte, c.gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return c.gcm.Seal(nonce, nonce, []byte(token), nil), nil
+}
+
+func (c TokenCipher) Decrypt(enc []byte) (string, error) {
+	n := c.gcm.NonceSize()
+	if len(enc) < n {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plain, err := c.gcm.Open(nil, enc[:n], enc[n:], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
 }
 
 // ExtractBearer pulls the token out of an Authorization: Bearer <token> header.
