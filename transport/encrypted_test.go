@@ -73,17 +73,74 @@ func TestEncryptedTransportManyPacketsInOrder(t *testing.T) {
 	}
 }
 
+// The client side (isExitNode=false) never auto-falls-back to plaintext, so
+// a wrong token there just drops the packet - unlike the exit-node side,
+// which can't tell "wrong token" from "peer never encrypted" (see
+// TestEncryptedTransportExitNodePassesThroughUnencryptedPeer) and must
+// assume the latter.
 func TestEncryptedTransportWrongTokenFailsToDecrypt(t *testing.T) {
 	rawA, rawB := newPipe()
-	client := NewEncryptedTransport(rawA, "token-one", false)
-	node := NewEncryptedTransport(rawB, "token-two", true)
+	node := NewEncryptedTransport(rawA, "token-one", true)
+	client := NewEncryptedTransport(rawB, "token-two", false)
 
 	var got []byte
-	node.Receive(func(d []byte) { got = d })
-	client.Send([]byte("secret"))
+	client.Receive(func(d []byte) { got = d })
+	node.Send([]byte("secret"))
 
 	if got != nil {
 		t.Errorf("decrypted with the wrong token: %v", got)
+	}
+}
+
+// An old app build, or a different app entirely, never wraps its transport
+// in EncryptedTransport at all - so from the exit node's side this looks
+// exactly like plain, unencrypted packets arriving on the wire. The node
+// must keep delivering them instead of dropping real traffic.
+func TestEncryptedTransportExitNodePassesThroughUnencryptedPeer(t *testing.T) {
+	rawA, rawB := newPipe()
+	node := NewEncryptedTransport(rawA, "shared-secret-token", true)
+
+	var got []byte
+	node.Receive(func(d []byte) { got = d })
+	rawB.Send([]byte("plaintext from an old client"))
+
+	if string(got) != "plaintext from an old client" {
+		t.Errorf("got %q, want plaintext passed through", got)
+	}
+}
+
+// Until the node has seen proof the peer understands encryption, it must
+// keep sending plaintext too - otherwise an old/foreign peer would never
+// understand the node's replies either.
+func TestEncryptedTransportExitNodeSendsPlaintextUntilPeerProvesEncryption(t *testing.T) {
+	rawA, rawB := newPipe()
+	node := NewEncryptedTransport(rawA, "shared-secret-token", true)
+
+	var gotRaw []byte
+	rawB.Receive(func(d []byte) { gotRaw = d })
+	if err := node.Send([]byte("hello")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if string(gotRaw) != "hello" {
+		t.Errorf("node sent %q before seeing ciphertext, want plaintext passthrough", gotRaw)
+	}
+
+	client := NewEncryptedTransport(rawB, "shared-secret-token", false)
+	var gotAtNode []byte
+	node.Receive(func(d []byte) { gotAtNode = d })
+	if err := client.Send([]byte("now encrypting")); err != nil {
+		t.Fatalf("client.Send: %v", err)
+	}
+	if string(gotAtNode) != "now encrypting" {
+		t.Fatalf("node failed to decrypt client's first ciphertext: %q", gotAtNode)
+	}
+
+	rawB.Receive(func(d []byte) { gotRaw = d })
+	if err := node.Send([]byte("now switching to ciphertext too")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if string(gotRaw) == "now switching to ciphertext too" {
+		t.Errorf("node still sent plaintext after seeing the peer encrypt")
 	}
 }
 
