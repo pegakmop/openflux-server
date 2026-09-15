@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	rtdebug "runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +39,8 @@ func main() {
 	managed := flag.Bool("managed", false, "Exit node only: fetch active keys from a controlplane instance instead of a single --url")
 	controlURL := flag.String("control-url", "", "Managed mode: base URL of the openflux-control service")
 	nodeToken := flag.String("node-token", "", "Managed mode: this node's bearer token from controlplane")
+	mode := flag.String("mode", "raw", "Exit node only: 'raw' (default, needs root; raw socket + gvisor NAT, forwards any IP protocol) or 'proxy' (no root, no raw socket; TCP only - see README)")
+	localIP := flag.String("local-ip", "", "Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with -s instead of host-wide")
 	flag.StringVar(&globalDocUrl, "url", "http://#", "Document URL. If u use Yandex.Docs transport")
 	docUrls := flag.String("urls", "", "Comma-separated doc URLs for --transport yandex_multistream (2+ required, same list on both ends)")
 	flag.StringVar(&maxToken, "maxToken", "", "MAX call user id. If u use MAX transport")
@@ -53,6 +56,22 @@ func main() {
 		utils.EnableDebug()
 	}
 
+	exitMode, modeErr := tunnel.ParseExitMode(*mode)
+	if modeErr != nil {
+		log.Fatalf("%v", modeErr)
+	}
+	if *localIP != "" {
+		tunnel.SetLocalIP(*localIP)
+	}
+	if *exitNode {
+		// The exit node often runs on a small VPS; keep the heap tight
+		// under load instead of crashing (set GOMEMLIMIT in the
+		// environment for a hard cap on top of this). Per-packet debug
+		// logging is the main allocation source under real traffic - avoid
+		// --debug in production regardless of this.
+		rtdebug.SetGCPercent(20)
+	}
+
 	if *managed {
 		if !*exitNode {
 			log.Fatalf("--managed is only valid together with --exit-node")
@@ -62,12 +81,14 @@ func main() {
 		}
 
 		log.Printf("=== Universal Bypass Tool ===")
-		log.Printf("Mode: EXIT NODE (managed, control=%s)", *controlURL)
+		log.Printf("Mode: EXIT NODE (managed, control=%s, exit-mode=%s)", *controlURL, exitMode)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		orch := nodeagent.NewOrchestrator(nodeagent.DefaultConfig(*controlURL, *nodeToken))
+		cfg := nodeagent.DefaultConfig(*controlURL, *nodeToken)
+		cfg.ExitMode = exitMode
+		orch := nodeagent.NewOrchestrator(cfg)
 		orch.Run(ctx)
 		return
 	}
@@ -105,11 +126,25 @@ func main() {
 		log.Fatalf("Failed to start transport: %v", err)
 	}
 
-	tun := tunnel.NewTCPTunnel(trans, *exitNode)
+	tun := tunnel.NewTCPTunnelMode(trans, *exitNode, exitMode)
 
 	if *exitNode {
-		log.Printf("Running as EXIT NODE (needs root for raw socket)")
-		log.Printf("! Run: sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP")
+		if exitMode == tunnel.ExitModeProxy {
+			log.Printf("Running as EXIT NODE (proxy mode - no root, no raw socket, TCP only)")
+		} else {
+			log.Printf("Running as EXIT NODE (raw mode, needs root for raw socket)")
+			if *localIP != "" {
+				// Scoped: only drop kernel RSTs from the tunnel's own
+				// egress IP, leaving the host's other services untouched.
+				log.Printf("! Run: sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s %s -j DROP", *localIP)
+			} else {
+				log.Printf("! Kernel RSTs would tear down tunnel connections. Prefer a scoped rule:")
+				log.Printf("!   assign a dedicated alias IP, run with --local-ip <ip>, then:")
+				log.Printf("!   sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s <ip> -j DROP")
+				log.Printf("! Host-wide fallback (drops ALL outbound RST; makes closed ports look filtered):")
+				log.Printf("!   sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP")
+			}
+		}
 		select {}
 	} else {
 		log.Printf("Running as CLIENT (SOCKS5 on %s)", *socksAddr)

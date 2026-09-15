@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync/atomic"
 	"time"
@@ -13,26 +14,87 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
 
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
 )
+
+// ExitMode picks how an exit-node TCPTunnel reaches the real internet - see
+// NewTCPTunnelMode.
+type ExitMode int
+
+const (
+	// ExitModeRaw forwards raw IP packets through a real raw socket, backed
+	// by gvisor's own NAT/forwarding (SetForwardingDefaultAndAllNICs) - the
+	// long-standing default. Needs root and a raw socket, and carries any
+	// IP protocol the client sends (this is how general UDP relay, not just
+	// TCP, currently works) - but that same protocol-agnostic forwarding is
+	// also what let an unexpected ICMP packet reach gvisor's NAT code and
+	// crash it (nil pointer deref) before InjectInbound started filtering
+	// non-TCP packets out.
+	ExitModeRaw ExitMode = iota
+	// ExitModeProxy terminates each TCP flow locally in gvisor (via a
+	// tcp.Forwarder) and re-originates it with an ordinary net.Dial to the
+	// real destination - no root, no raw socket, no iptables RST-drop rule,
+	// and no path through gvisor's NAT code at all (so the ICMP crash class
+	// of bug can't recur here even in principle). Ported from upstream
+	// (p1neappleXpress/OpenFlux), which defaults to it. Not the default
+	// here yet: it only forwards TCP - a UDP packet arriving under this mode
+	// gets gvisor's own default response for an unclaimed port (an ICMP
+	// port-unreachable, which incidentally makes QUIC-preferring apps fall
+	// back to TCP fast instead of stalling - upstream hand-crafts this same
+	// ICMP reply on its gvisor-free iOS path; here it's just what the stack
+	// already does when nothing registers a UDP handler) rather than being
+	// relayed - switching the default would silently drop that for anyone
+	// depending on it today.
+	ExitModeProxy
+)
+
+func (m ExitMode) String() string {
+	if m == ExitModeProxy {
+		return "proxy"
+	}
+	return "raw"
+}
+
+// ParseExitMode parses the --mode flag's value.
+func ParseExitMode(s string) (ExitMode, error) {
+	switch s {
+	case "", "raw":
+		return ExitModeRaw, nil
+	case "proxy":
+		return ExitModeProxy, nil
+	default:
+		return ExitModeRaw, fmt.Errorf("unknown mode %q (want raw|proxy)", s)
+	}
+}
 
 type TCPTunnel struct {
 	gvisorStack *stack.Stack
 	tunnelEP    *TunnelLinkEndpoint
 	transport   transport.Transport
 	isExitNode  bool
+	exitMode    ExitMode
 	rawEP       *RawSocketEndpoint
 	startTime   time.Time
 	packetCount atomic.Uint64
 	stopStats   chan struct{}
 }
 
+// NewTCPTunnel is NewTCPTunnelMode with ExitModeRaw - the long-standing
+// default, unchanged for every existing caller.
 func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
+	return NewTCPTunnelMode(trans, isExitNode, ExitModeRaw)
+}
+
+// NewTCPTunnelMode is NewTCPTunnel with an explicit exit mode (see ExitMode);
+// mode is ignored when isExitNode is false.
+func NewTCPTunnelMode(trans transport.Transport, isExitNode bool, mode ExitMode) *TCPTunnel {
 	t := &TCPTunnel{
 		transport:  trans,
 		isExitNode: isExitNode,
+		exitMode:   mode,
 		startTime:  time.Now(),
 		stopStats:  make(chan struct{}),
 	}
@@ -84,7 +146,11 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 	}
 
 	if isExitNode {
-		t.setupExitNode(tunnelNIC)
+		if mode == ExitModeProxy {
+			t.setupExitNodeProxy(tunnelNIC)
+		} else {
+			t.setupExitNodeRaw(tunnelNIC)
+		}
 	} else {
 		t.setupClient(tunnelNIC)
 	}
@@ -97,13 +163,92 @@ func NewTCPTunnel(trans transport.Transport, isExitNode bool) *TCPTunnel {
 	return t
 }
 
-func (t *TCPTunnel) setupExitNode(tunnelNIC tcpip.NICID) {
+// setupExitNodeProxy terminates each client TCP flow locally in gvisor and
+// re-originates it with a plain net.Dial to the real destination - see
+// ExitModeProxy's doc comment. SetPromiscuousMode+SetSpoofing let this NIC
+// accept and reply to a SYN for ANY destination IP (every real address the
+// client dials, none of which this NIC actually owns) without gvisor
+// rejecting it as foreign traffic first.
+func (t *TCPTunnel) setupExitNodeProxy(tunnelNIC tcpip.NICID) {
+	utils.Debugf("[TUNNEL] EXIT NODE - proxy mode (no raw socket, no root)")
+
+	if err := t.gvisorStack.SetPromiscuousMode(tunnelNIC, true); err != nil {
+		utils.Debugf("[TUNNEL] SetPromiscuousMode error: %v", err)
+	}
+	if err := t.gvisorStack.SetSpoofing(tunnelNIC, true); err != nil {
+		utils.Debugf("[TUNNEL] SetSpoofing error: %v", err)
+	}
+	t.gvisorStack.AddRoute(tcpip.Route{
+		Destination: header.IPv4EmptySubnet,
+		NIC:         tunnelNIC,
+	})
+
+	fwd := tcp.NewForwarder(t.gvisorStack, 0, 8192, t.handleExitTCP)
+	t.gvisorStack.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
+	// No udp.NewForwarder here - see ExitModeProxy's doc comment: this
+	// leaves UDP unclaimed, and gvisor answers it with its own default
+	// port-unreachable response rather than this mode relaying it.
+}
+
+// handleExitTCP accepts one client flow's TCP handshake locally (via
+// r.CreateEndpoint, gvisor's side of the connection) and relays it to the
+// real destination with an ordinary net.Dial - the entire point of proxy
+// mode: nothing here touches a raw socket or gvisor's NAT/forwarding code.
+func (t *TCPTunnel) handleExitTCP(r *tcp.ForwarderRequest) {
+	id := r.ID()
+	dest := net.JoinHostPort(id.LocalAddress.String(), fmt.Sprintf("%d", id.LocalPort))
+
+	var wq waiter.Queue
+	ep, tErr := r.CreateEndpoint(&wq)
+	if tErr != nil {
+		utils.Debugf("[EXIT] proxy CreateEndpoint %s: %v", dest, tErr)
+		r.Complete(true)
+		return
+	}
+	r.Complete(false)
+	local := gonet.NewTCPConn(&wq, ep)
+
+	go func() {
+		remote, err := net.DialTimeout("tcp", dest, 10*time.Second)
+		if err != nil {
+			utils.Debugf("[EXIT] proxy dial %s failed: %v", dest, err)
+			local.Close()
+			return
+		}
+		if tc, ok := remote.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+		}
+		utils.Debugf("[EXIT] proxy %s connected", dest)
+
+		go func() {
+			io.Copy(remote, local)
+			remote.Close()
+		}()
+		io.Copy(local, remote)
+		local.Close()
+		remote.Close()
+	}()
+}
+
+// setupExitNodeRaw forwards raw IP packets through a real raw socket via
+// gvisor's own NAT (SetForwardingDefaultAndAllNICs) - needs root, and the
+// kernel's own TCP stack (which owns no socket for these gvisor-terminated
+// connections) sends a real RST on every reply unless the deploy also runs
+// the RST-drop iptables rule mentioned on localIPOverride/SetLocalIP above.
+func (t *TCPTunnel) setupExitNodeRaw(tunnelNIC tcpip.NICID) {
 	localIP := getLocalIP()
-	utils.Debugf("[TUNNEL] EXIT NODE - Local IP: %s", localIP)
+	utils.Debugf("[TUNNEL] EXIT NODE - raw mode, local IP: %s", localIP)
 
 	rawEP, err := NewRawSocketEndpoint(tcpip.NICID(2))
 	if err != nil {
-		utils.Debugf("[TUNNEL] Raw socket error: %v", err)
+		// Most commonly: not running as root. Falling back instead of
+		// leaving a half-configured tunnel (a tunnel NIC with no route to
+		// anywhere) means forgetting sudo degrades to a working but
+		// UDP-relay-less exit node instead of a silently broken one.
+		utils.Debugf("[TUNNEL] raw socket error (mode raw needs root): %v", err)
+		utils.Debugf("[TUNNEL] falling back to proxy mode")
+		t.exitMode = ExitModeProxy
+		t.setupExitNodeProxy(tunnelNIC)
 		return
 	}
 
@@ -193,7 +338,7 @@ func (t *TCPTunnel) DialTCP(address string) (net.Conn, error) {
 	}
 
 	nic := tcpip.NICID(1)
-	if t.isExitNode {
+	if t.isExitNode && t.exitMode == ExitModeRaw {
 		nic = tcpip.NICID(2)
 	}
 
@@ -225,7 +370,7 @@ func (t *TCPTunnel) DialUDP(address string) (net.Conn, error) {
 	}
 
 	nic := tcpip.NICID(1)
-	if t.isExitNode {
+	if t.isExitNode && t.exitMode == ExitModeRaw {
 		nic = tcpip.NICID(2)
 	}
 
@@ -254,8 +399,9 @@ func (t *TCPTunnel) printStats() {
 			return
 		case <-ticker.C:
 			stats := t.gvisorStack.Stats()
-			utils.Debugf("[STATS] uptime=%v packets=%d connected=%d established=%d retrans=%d",
+			utils.Debugf("[STATS] uptime=%v mode=%s packets=%d connected=%d established=%d retrans=%d",
 				time.Since(t.startTime).Round(time.Second),
+				t.exitMode.String(),
 				t.packetCount.Load(),
 				stats.TCP.CurrentConnected.Value(),
 				stats.TCP.CurrentEstablished.Value(),
@@ -274,7 +420,25 @@ func (t *TCPTunnel) Close() {
 	t.gvisorStack.Destroy()
 }
 
+// localIPOverride, when set, is the address raw mode uses as its egress IP
+// instead of auto-detecting one. Point it at a dedicated alias IP so the
+// RST-drop iptables rule raw mode needs (see setupExitNodeRaw's doc comment
+// on why) can be scoped as `-s <ip>` instead of dropping every outbound RST
+// on the host - which makes every closed port on the box look "filtered"
+// to a port scan instead of "closed", and stops the host resetting any
+// OTHER connection of its own. `-m owner --uid-owner` can't fix this either:
+// the RSTs are kernel-generated with no owning socket to match.
+var localIPOverride string
+
+// SetLocalIP overrides the auto-detected egress IP raw mode uses - see
+// localIPOverride. Ignored in proxy mode, which has no raw socket and so
+// nothing that needs an RST-drop rule scoped to begin with.
+func SetLocalIP(ip string) { localIPOverride = ip }
+
 func getLocalIP() string {
+	if localIPOverride != "" {
+		return localIPOverride
+	}
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return "192.168.1.100"

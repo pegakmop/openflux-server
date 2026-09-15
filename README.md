@@ -70,13 +70,43 @@ export XCODE_PATH="<your Xcode.app path>" # optional, defaults to /Applications/
 ## Usage
 
 ### Setting up an exit node
-1. You must have root access on the exit-node machine;
-2. Only the legacy Yandex document editor is supported (toggle this from the interface).
 
+The exit node reaches the real internet in one of two modes (`--mode`):
+
+- **raw** (default) — gvisor forwards raw IP packets through a real raw socket (needs root)
+  and its own NAT/forwarding. Carries any IP protocol the client sends - this is how general
+  UDP relay (not just DNS) currently works - but the kernel has no socket for these
+  gvisor-terminated connections and sends a real RST on every reply unless suppressed; see
+  below. Only tested on Linux.
+- **proxy** — each TCP flow is terminated locally in gvisor and re-originated with a plain
+  `net.Dial` to the real destination. No root, no raw socket, no RST-drop rule needed at all.
+  TCP only: a UDP packet gets gvisor's own default port-unreachable response instead of being
+  relayed (which incidentally makes QUIC-preferring apps fall back to TCP fast instead of
+  stalling). Works on Linux, Windows, macOS.
+
+Raw mode's kernel-generated RSTs must be suppressed, but **scoped**, not host-wide - a blanket
+`-j DROP` on all outbound RSTs makes every closed port on the box answer with silence (a port
+scanner sees "filtered" instead of "closed") and stops the host resetting any of its own other
+connections. `-m owner --uid-owner` can't fix this: the RSTs are kernel-generated with no
+owning socket, so the owner match never fires.
+
+```bash
+# raw mode (default), scoped to a dedicated egress IP:
+sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s <your-alias-ip> -j DROP
+sudo ./universal-bypass-tool --exit-node --local-ip <your-alias-ip> --url "YOUR_YANDEX_DOC_URL" --debug
+
+# proxy mode - no root, no iptables rule, but no general UDP relay either:
+./universal-bypass-tool --exit-node --mode proxy --url "YOUR_YANDEX_DOC_URL" --debug
+```
+
+Host-wide fallback for raw mode (only on a single-purpose box, understanding the trade-off
+above):
 ```bash
 sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 ```
+
+1. Only the legacy Yandex document editor is supported (toggle this from the interface).
 
 ### Setting up a desktop client
 
@@ -101,6 +131,8 @@ Then set up a SOCKS5 proxy in your browser at localhost:1080.
 | `--managed`      | `false` | Exit node only: fetch active keys from a controlplane instance instead of a single `--url` |
 | `--control-url`  | ``      | Managed mode: base URL of the `openflux-control` service |
 | `--node-token`   | ``      | Managed mode: this node's bearer token from controlplane |
+| `--mode`         | `raw`   | Exit node only: `raw` (needs root, general UDP relay) or `proxy` (no root, TCP only) |
+| `--local-ip`     | ``      | Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with `-s` |
 
 ## Multi-user deployments (controlplane)
 

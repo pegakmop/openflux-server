@@ -22,6 +22,11 @@ type Config struct {
 	PollInterval    time.Duration
 	UsageInterval   time.Duration
 	HeartbeatPeriod time.Duration
+	// ExitMode picks how every worker's TCPTunnel reaches the real
+	// internet - see tunnel.ExitMode. Defaults to tunnel.ExitModeRaw
+	// (DefaultConfig's zero value), matching every existing managed
+	// deployment's current behavior.
+	ExitMode tunnel.ExitMode
 }
 
 func DefaultConfig(controlURL, nodeToken string) Config {
@@ -31,6 +36,7 @@ func DefaultConfig(controlURL, nodeToken string) Config {
 		PollInterval:    20 * time.Second,
 		UsageInterval:   20 * time.Second,
 		HeartbeatPeriod: 60 * time.Second,
+		ExitMode:        tunnel.ExitModeRaw,
 	}
 }
 
@@ -232,12 +238,15 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		o.ports.release(portIdx)
 		return nil, err
 	}
-	tun := tunnel.NewTCPTunnel(trans, true)
+	tun := tunnel.NewTCPTunnelMode(trans, true, o.cfg.ExitMode)
 	// See TCPTunnel.SetPortRange's doc comment: every worker on this node
 	// shares one real IP and one raw socket's view of all inbound TCP
 	// traffic, so without a disjoint range per worker, two keys' stacks
 	// could independently pick the same source port at the same time and
-	// cross-deliver each other's traffic.
+	// cross-deliver each other's traffic. Moot under ExitModeProxy (no
+	// shared raw socket, no ephemeral-port allocation on this stack at all
+	// - real egress is a plain net.Dial outside gvisor) but harmless to
+	// still set.
 	tun.SetPortRange(portStart, portEnd)
 	return &worker{trans: trans, tun: tun, docURL: label, portIdx: portIdx}, nil
 }
