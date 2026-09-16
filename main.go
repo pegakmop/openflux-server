@@ -41,6 +41,7 @@ func main() {
 	nodeToken := flag.String("node-token", "", "Managed mode: this node's bearer token from controlplane")
 	mode := flag.String("mode", "raw", "Exit node only: 'raw' (default, needs root; raw socket + gvisor NAT, forwards any IP protocol) or 'proxy' (no root, no raw socket; TCP only - see README)")
 	localIP := flag.String("local-ip", "", "Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with -s instead of host-wide")
+	codec := flag.String("codec", "legacy", "Wire codec for --transport volga/oneme: 'legacy' (default, per-packet LZ4 - unchanged) or 'batched' (coalesce bursts into one zstd-compressed message per transport send; both ends must agree - see README). Ignored for yandex/yandex_multistream, which auto-negotiate their own whole-batch zstd format with the peer - see README.")
 	flag.StringVar(&globalDocUrl, "url", "http://#", "Document URL. If u use Yandex.Docs transport")
 	docUrls := flag.String("urls", "", "Comma-separated doc URLs for --transport yandex_multistream (2+ required, same list on both ends)")
 	flag.StringVar(&maxToken, "maxToken", "", "MAX call user id. If u use MAX transport")
@@ -100,14 +101,33 @@ func main() {
 	config := transport.DefaultConfig()
 	var trans transport.Transport
 
+	wrapCodec := func(inner transport.Transport) transport.Transport {
+		wrapped, err := transport.WrapCodec(inner, *codec)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		return wrapped
+	}
+
+	// selfCompressingYandex builds a Yandex transport that manages its own
+	// per-batch compression (see YandexDocsTransport.EnableSelfCompression)
+	// instead of --codec's generic wrapping - it auto-negotiates with the
+	// peer and is never worse than --codec=legacy, so --codec is ignored
+	// for this transport type (it still applies to volga/oneme below).
+	selfCompressingYandex := func(url string) transport.Transport {
+		yd := yandex.NewYandexDocsTransport(url, config)
+		yd.EnableSelfCompression()
+		return yd
+	}
+
 	switch *transportType {
 	case "yandex":
-		trans = transport.NewCompressedTransport(yandex.NewYandexDocsTransport(globalDocUrl, config))
+		trans = selfCompressingYandex(globalDocUrl)
 	case "volga":
-		trans = transport.NewCompressedTransport(yandex.NewYandexVolgaTransport(globalDocUrl, config))
+		trans = wrapCodec(yandex.NewYandexVolgaTransport(globalDocUrl, config))
 	case "oneme":
 		uidint, _ := strconv.ParseInt(maxUid, 10, 64)
-		trans = transport.NewCompressedTransport(oneme.NewOneMeTransport(*exitNode, maxToken, uidint, config))
+		trans = wrapCodec(oneme.NewOneMeTransport(*exitNode, maxToken, uidint, config))
 	case "yandex_multistream":
 		urls := strings.Split(*docUrls, ",")
 		if len(urls) < 2 {
@@ -115,7 +135,7 @@ func main() {
 		}
 		streams := make([]transport.Transport, len(urls))
 		for i, url := range urls {
-			streams[i] = transport.NewCompressedTransport(yandex.NewYandexDocsTransport(strings.TrimSpace(url), config))
+			streams[i] = selfCompressingYandex(strings.TrimSpace(url))
 		}
 		trans = transport.NewMultiStreamTransport(streams)
 	default:
@@ -127,6 +147,11 @@ func main() {
 	}
 
 	tun := tunnel.NewTCPTunnelMode(trans, *exitNode, exitMode)
+	// Read back the tunnel's actual mode, not the requested one: raw mode
+	// silently falls back to proxy mode if raw-socket creation fails (e.g.
+	// missing root), and printing the requested mode here would tell the
+	// operator to apply iptables rules a proxy-mode node doesn't need.
+	exitMode = tun.ExitMode()
 
 	if *exitNode {
 		if exitMode == tunnel.ExitModeProxy {

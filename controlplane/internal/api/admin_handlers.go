@@ -268,15 +268,23 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 			if len(urls) == 0 {
 				urls = []string{k.DocURL}
 			}
-			inUse, err := a.Store.HasEnabledKeyWithAnyDocURL(r.Context(), urls, id)
-			if err != nil {
-				writeInternalError(w, r, "check doc_url failed", err)
-				return
-			}
-			if inUse {
+			// Guarded: holds a DB-level advisory lock on urls for the check
+			// and the enable together, so two concurrent re-enable requests
+			// for keys sharing a doc_url can't both pass the check before
+			// either commits (see CreateKeyGuarded's doc comment).
+			err = a.Store.SetKeyEnabledGuarded(r.Context(), id, urls)
+			if err == store.ErrDocURLInUse {
 				writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
 				return
+			} else if err == store.ErrNotFound {
+				writeError(w, http.StatusNotFound, "key not found")
+				return
+			} else if err != nil {
+				writeInternalError(w, r, "update key failed", err)
+				return
 			}
+			writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+			return
 		}
 
 		if err := a.Store.SetKeyEnabled(r.Context(), id, enabled); err == store.ErrNotFound {

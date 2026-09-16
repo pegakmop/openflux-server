@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -190,6 +191,25 @@ func (t *TCPTunnel) setupExitNodeProxy(tunnelNIC tcpip.NICID) {
 	// port-unreachable response rather than this mode relaying it.
 }
 
+// exitTCPMaxFlows bounds how many proxy-mode flows this process relays at
+// once - handleExitTCP has no other backpressure once a flow is dialed (the
+// forwarder's 8192 backlog only limits pending SYNs, not established
+// flows), so without a cap a burst of destinations that accept a connection
+// and then go silent (a common, non-malicious internet condition - not just
+// an attack) would otherwise accumulate goroutines/sockets/gvisor endpoints
+// without bound.
+const exitTCPMaxFlows = 4096
+
+// exitTCPIdleTimeout closes a proxy-mode flow that's been silent (no bytes
+// either direction) this long - net.DialTimeout only bounds the initial
+// connect, so without this a remote peer that accepts the connection and
+// then never sends or reads again (a blackholed NAT/firewall, a hung
+// server) would otherwise leak its goroutines/socket/gvisor endpoint for
+// the tunnel's entire remaining lifetime.
+const exitTCPIdleTimeout = 5 * time.Minute
+
+var exitTCPSemaphore = make(chan struct{}, exitTCPMaxFlows)
+
 // handleExitTCP accepts one client flow's TCP handshake locally (via
 // r.CreateEndpoint, gvisor's side of the connection) and relays it to the
 // real destination with an ordinary net.Dial - the entire point of proxy
@@ -208,7 +228,17 @@ func (t *TCPTunnel) handleExitTCP(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	local := gonet.NewTCPConn(&wq, ep)
 
+	select {
+	case exitTCPSemaphore <- struct{}{}:
+	default:
+		utils.Debugf("[EXIT] proxy %s rejected: too many concurrent flows (%d)", dest, exitTCPMaxFlows)
+		local.Close()
+		return
+	}
+
 	go func() {
+		defer func() { <-exitTCPSemaphore }()
+
 		remote, err := net.DialTimeout("tcp", dest, 10*time.Second)
 		if err != nil {
 			utils.Debugf("[EXIT] proxy dial %s failed: %v", dest, err)
@@ -217,17 +247,49 @@ func (t *TCPTunnel) handleExitTCP(r *tcp.ForwarderRequest) {
 		}
 		if tc, ok := remote.(*net.TCPConn); ok {
 			_ = tc.SetNoDelay(true)
+			_ = tc.SetKeepAlive(true)
+			_ = tc.SetKeepAlivePeriod(30 * time.Second)
 		}
 		utils.Debugf("[EXIT] proxy %s connected", dest)
 
+		var wg sync.WaitGroup
+		wg.Add(2)
 		go func() {
-			io.Copy(remote, local)
-			remote.Close()
+			defer wg.Done()
+			idleCopy(remote, local, exitTCPIdleTimeout)
 		}()
-		io.Copy(local, remote)
+		go func() {
+			defer wg.Done()
+			idleCopy(local, remote, exitTCPIdleTimeout)
+		}()
+		wg.Wait()
 		local.Close()
 		remote.Close()
 	}()
+}
+
+// idleCopy is io.Copy with a per-read/write idle deadline: src.Read (and the
+// dst.Write that follows a successful read) must make progress within
+// idleTimeout or the copy gives up, instead of blocking forever on a peer
+// that's gone silent without closing the connection.
+func idleCopy(dst, src net.Conn, idleTimeout time.Duration) {
+	buf := make([]byte, 32*1024)
+	for {
+		_ = src.SetReadDeadline(time.Now().Add(idleTimeout))
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			_ = dst.SetWriteDeadline(time.Now().Add(idleTimeout))
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if rerr != nil {
+			if rerr != io.EOF {
+				utils.Debugf("[EXIT] proxy idle copy read error: %v", rerr)
+			}
+			return
+		}
+	}
 }
 
 // setupExitNodeRaw forwards raw IP packets through a real raw socket via
@@ -304,6 +366,16 @@ func (t *TCPTunnel) setupClient(tunnelNIC tcpip.NICID) {
 		Destination: header.IPv4EmptySubnet,
 		NIC:         tunnelNIC,
 	})
+}
+
+// ExitMode reports the exit mode this tunnel actually ended up running in -
+// which can differ from what NewTCPTunnelMode was asked for if raw-socket
+// setup failed and silently fell back to proxy mode (see
+// setupExitNodeRaw). Callers that print or act on the requested mode (e.g.
+// main.go's startup banner) should read this instead, so a fallback isn't
+// reported as if raw mode were actually running.
+func (t *TCPTunnel) ExitMode() ExitMode {
+	return t.exitMode
 }
 
 // SetPortRange restricts the ephemeral ports this tunnel's gvisor stack

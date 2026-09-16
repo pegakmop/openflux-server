@@ -115,4 +115,14 @@ curl -s -X POST $BASE/v1/resolve -H "Authorization: Bearer <client key token>"
   per IP (in-memory token bucket — resets per replica, so treat it as a brake on casual abuse, not
   a hard guarantee).
 - Usage is reported in batches by each node on an interval, not per packet, so write volume scales
-  with node count, not user count.
+  with node count, not user count. A single batch is capped at 1000 deltas server-side
+  (`handleNodeUsage`) — the node itself chunks into multiple requests above that, so this only
+  matters if you're changing the cap on both ends together.
+- How many keys one exit node can serve depends on its `--mode` (see the main README): `proxy` has
+  no per-node cap beyond what the box's own resources allow; `raw` reserves a disjoint port range
+  per key to avoid cross-talk on the one shared raw socket/IP, which caps a single raw-mode node at
+  roughly 252 concurrent keys (`portRangeSize`/`portRangeMax` in `nodeagent/orchestrator.go`) —
+  assign more nodes rather than expecting one raw-mode node to grow past that.
+- A raw-mode node's raw sockets are opened once per process and shared by every worker on it, not
+  one pair per key - see `tunnel/rawsocket_linux.go`'s `rawSocketCore` - so CPU spent on the return
+  path scales with real traffic, not with how many keys happen to be assigned to that node.

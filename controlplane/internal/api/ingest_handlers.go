@@ -104,20 +104,18 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		// and a new key is enabled immediately (enabled defaults to true),
 		// so this has to be checked at creation time, not just when
 		// re-enabling one.
+		// A per-entry set catches a duplicate URL repeated within this one
+		// entry's own doc_urls too, not just a collision against an earlier
+		// entry in the batch - urlsInBatch alone only gets populated after
+		// this loop, so two identical URLs inside the same doc_urls list
+		// would otherwise never collide with each other.
+		urlSet := make(map[string]bool, len(urls))
 		for _, u := range urls {
-			if urlsInBatch[u] {
+			if urlsInBatch[u] || urlSet[u] {
 				writeError(w, http.StatusConflict, "doc_url is used by more than one key in this request - each key needs its own Yandex Docs document")
 				return
 			}
-		}
-		inUse, err := a.Store.HasEnabledKeyWithAnyDocURL(r.Context(), urls, "")
-		if err != nil {
-			writeInternalError(w, r, "check doc_url failed", err)
-			return
-		}
-		if inUse {
-			writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
-			return
+			urlSet[u] = true
 		}
 		for _, u := range urls {
 			urlsInBatch[u] = true
@@ -138,7 +136,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			return
 		}
 
-		k, err := a.Store.CreateKey(r.Context(), store.CreateKeyParams{
+		k, err := a.Store.CreateKeyGuarded(r.Context(), store.CreateKeyParams{
 			TokenHash:         a.Hasher.Hash(token),
 			TokenEnc:          tokenEnc,
 			Label:             req.Label,
@@ -149,7 +147,11 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			TrafficLimitBytes: req.TrafficLimitBytes,
 			OwnerRef:          ownerRef,
 			ExpiresAt:         req.ExpiresAt,
-		})
+		}, urls)
+		if err == store.ErrDocURLInUse {
+			writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")
+			return
+		}
 		if err != nil {
 			writeInternalError(w, r, "create key failed", err)
 			return

@@ -37,11 +37,18 @@ type RemoteKey struct {
 	Transport         string   `json:"transport"`
 	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 	BytesUsedTotal    int64    `json:"bytes_used_total"`
-	// Token, when set, is the raw key token - the client uses it as the
-	// end-to-end encryption key (see transport.NewEncryptedTransport), so
-	// this worker needs the same value to derive matching keys. Empty for
-	// a key created before that existed; the worker just runs unencrypted.
+	// Token, when set, is the raw key token - used as the end-to-end
+	// encryption key (see transport.NewEncryptedTransport) when
+	// E2EEncryption is also true. Empty for a key created before token_enc
+	// existed.
 	Token string `json:"token,omitempty"`
+	// E2EEncryption mirrors the key's e2e_encryption setting from the panel
+	// - startWorker wraps this worker's transport in
+	// transport.EncryptedTransport if and only if this is true, the same
+	// condition the client applies from its own deep link. This is what
+	// makes the setting actually binding instead of advisory - see
+	// transport.EncryptedTransport's doc comment.
+	E2EEncryption bool `json:"e2e_encryption,omitempty"`
 }
 
 func (c *ControlClient) ListKeys(ctx context.Context) ([]RemoteKey, error) {

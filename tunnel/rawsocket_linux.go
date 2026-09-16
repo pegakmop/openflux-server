@@ -16,26 +16,67 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-type RawSocketEndpoint struct {
-	dispatcher stack.NetworkDispatcher
-	sendFd     int
-	recvFd     int
-	// recvUDPFd is a SECOND receive socket, for UDP. One socket cannot cover both: on Linux
-	// SOCK_RAW delivers exactly the protocol it was opened with, and IPPROTO_RAW is send-only
-	// (it receives nothing). While the only receive socket was IPPROTO_TCP, reply datagrams never
-	// reached the tunnel at all — from the client it looked like "UDP does not work", even though
-	// the requests did go out: sending uses IPPROTO_RAW, which is not limited to one protocol.
-	recvUDPFd       int
-	nicID           tcpip.NICID
-	localIP         [4]byte
-	packetIn        atomic.Uint64
-	packetOut       atomic.Uint64
-	outgoingSYNs    sync.Map
-	activePorts     sync.Map
-	sendToTransport func([]byte)
+// rawSocketCore owns the actual OS raw sockets (recv TCP, recv UDP, send)
+// for THIS WHOLE PROCESS - shared by every worker's RawSocketEndpoint,
+// never one per key.
+//
+// On Linux, a SOCK_RAW socket bound to a protocol receives a copy of EVERY
+// matching packet that hits the host, regardless of destination port -
+// there is no way to narrow that at the socket level. Before this, each
+// managed-mode worker (one per active key - see nodeagent.Orchestrator)
+// opened its own pair of raw sockets, so with N concurrently active keys
+// the kernel delivered, and each of N independent readLoop goroutines
+// independently parsed, header-checked, and (in all but one case) silently
+// discarded, its own full copy of every single packet on the host: O(N)
+// work per real packet instead of O(1), on top of N-1 wasted wakeups/
+// syscalls for every packet not addressed to a given worker. At more than
+// a handful of concurrent keys this dominates the exit node's CPU well
+// before real user traffic does - exactly the kind of bottleneck that
+// makes a fleet "choke" as the user count grows rather than scale with it.
+//
+// One shared instance fixes that: the kernel and this process each see and
+// handle a real packet once, then demux it by destination port straight to
+// whichever worker's transport actually owns that port - ports are already
+// globally unique per worker (nodeagent hands each one a disjoint range;
+// see TCPTunnel.SetPortRange's doc comment), so this is a plain lookup, not
+// a new coordination problem.
+type rawSocketCore struct {
+	sendFd, recvFd, recvUDPFd int
+	localIP                   [4]byte
+
+	outgoingSYNs sync.Map // seq uint32 -> struct{}
+	activePorts  sync.Map // port uint16 -> *RawSocketEndpoint (the owning worker)
 }
 
-func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
+var (
+	sharedRawCoreOnce sync.Once
+	sharedRawCore     *rawSocketCore
+	sharedRawCoreErr  error
+)
+
+// getSharedRawCore lazily creates the process-wide raw sockets on first use
+// and keeps them open for the process's lifetime - workers come and go
+// far more often than the exit node process itself restarts, and tearing
+// these down between workers would reintroduce the exact per-worker
+// open/close churn this type exists to avoid. Every caller after the first
+// gets the same instance and the same error, if creation failed.
+func getSharedRawCore() (*rawSocketCore, error) {
+	sharedRawCoreOnce.Do(func() {
+		sharedRawCore, sharedRawCoreErr = newRawSocketCore()
+		if sharedRawCoreErr == nil {
+			// One loop per socket: each has its own blocking Recvfrom, and
+			// there is nothing to share - a select over raw sockets would
+			// add a third moving part where a second goroutine is enough.
+			// Exactly two of these run for the whole process now, not two
+			// per worker.
+			go sharedRawCore.readLoop(sharedRawCore.recvFd, 6)
+			go sharedRawCore.readLoop(sharedRawCore.recvUDPFd, 17)
+		}
+	})
+	return sharedRawCore, sharedRawCoreErr
+}
+
+func newRawSocketCore() (*rawSocketCore, error) {
 	sendFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err != nil {
 		return nil, fmt.Errorf("send socket failed: %v (need root)", err)
@@ -62,6 +103,11 @@ func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 		return nil, fmt.Errorf("bind failed: %v", err)
 	}
 
+	// recvUDPFd is a SECOND receive socket, for UDP. One socket cannot cover both: on Linux
+	// SOCK_RAW delivers exactly the protocol it was opened with, and IPPROTO_RAW is send-only
+	// (it receives nothing). While the only receive socket was IPPROTO_TCP, reply datagrams never
+	// reached the tunnel at all — from the client it looked like "UDP does not work", even though
+	// the requests did go out: sending uses IPPROTO_RAW, which is not limited to one protocol.
 	recvUDPFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_UDP)
 	if err != nil {
 		syscall.Close(sendFd)
@@ -75,23 +121,17 @@ func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 		return nil, fmt.Errorf("udp bind failed: %v", err)
 	}
 
-	ep := &RawSocketEndpoint{
+	core := &rawSocketCore{
 		sendFd:    sendFd,
 		recvFd:    recvFd,
 		recvUDPFd: recvUDPFd,
-		nicID:     nicID,
 	}
-	fmt.Sscanf(getLocalIP(), "%d.%d.%d.%d", &ep.localIP[0], &ep.localIP[1], &ep.localIP[2], &ep.localIP[3])
-
-	// One loop per socket: each has its own blocking Recvfrom, and there is nothing to share —
-	// a select over raw sockets would add a third moving part where a second goroutine is enough.
-	go ep.readLoop(ep.recvFd, 6)
-	go ep.readLoop(ep.recvUDPFd, 17)
-	return ep, nil
-}
-
-func (e *RawSocketEndpoint) SetTransportSender(sendFunc func([]byte)) {
-	e.sendToTransport = sendFunc
+	// One lookup for the whole process instead of one per worker - besides
+	// being redundant, getLocalIP() without an override does a live
+	// net.Dial("udp", ...) just to learn the outbound interface, which is
+	// wasted work N-1 times over with N concurrent keys.
+	fmt.Sscanf(getLocalIP(), "%d.%d.%d.%d", &core.localIP[0], &core.localIP[1], &core.localIP[2], &core.localIP[3])
+	return core, nil
 }
 
 // readLoop is the return path of ONE protocol: the socket is opened for it, and wantProto merely
@@ -100,7 +140,7 @@ func (e *RawSocketEndpoint) SetTransportSender(sendFunc func([]byte)) {
 // The minimum length is protocol-dependent: TCP's header is 20 bytes (40 with IP), UDP's is 8
 // (28 with IP). A single threshold of 40 would drop short datagrams — a 30-byte DNS reply is
 // exactly that, and the loss would look like "UDP doesn't work" even though the packet arrived.
-func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
+func (c *rawSocketCore) readLoop(fd int, wantProto byte) {
 	buf := make([]byte, 65535)
 	minLen := 40
 	if wantProto == 17 {
@@ -114,7 +154,7 @@ func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			utils.Debugf("[RAW-NIC%d/%d] Read error: %v", e.nicID, wantProto, err)
+			utils.Debugf("[RAW/%d] Read error: %v", wantProto, err)
 			return
 		}
 		if n < minLen {
@@ -123,17 +163,20 @@ func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 
 		protocol := buf[9]
 
-		if protocol == wantProto && bytes.Equal(buf[16:20], e.localIP[:]) {
+		if protocol == wantProto && bytes.Equal(buf[16:20], c.localIP[:]) {
 			ipHeaderLenIn := int(buf[0]&0x0F) * 4
 			l4In := buf[ipHeaderLenIn:n]
 			dstPort := uint16(l4In[2])<<8 | uint16(l4In[3])
 
 			// A client port, not our own traffic. The gate is shared by both protocols: for TCP
 			// the port is registered by the SYN, for UDP by the first outbound datagram
-			// (see WritePackets).
-			if _, active := e.activePorts.Load(dstPort); !active {
+			// (see WritePackets). The value is which worker's transport owns that port - see
+			// rawSocketCore's doc comment on why one shared map replaces one per worker.
+			v, active := c.activePorts.Load(dstPort)
+			if !active {
 				continue
 			}
+			owner := v.(*RawSocketEndpoint)
 
 			// A SYN-ACK is matched against our own SYN so that a reply to somebody else's
 			// connection attempt on the same port never reaches the tunnel. UDP has no
@@ -142,10 +185,10 @@ func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 				ackNum := uint32(l4In[8])<<24 | uint32(l4In[9])<<16 | uint32(l4In[10])<<8 | uint32(l4In[11])
 				synSeq := ackNum - 1
 
-				if _, ok := e.outgoingSYNs.Load(synSeq); !ok {
+				if _, ok := c.outgoingSYNs.Load(synSeq); !ok {
 					continue
 				}
-				e.outgoingSYNs.Delete(synSeq)
+				c.outgoingSYNs.Delete(synSeq)
 			}
 
 			pktCopy := make([]byte, n)
@@ -164,11 +207,46 @@ func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 			dstIPBytes := [4]byte{pktCopy[16], pktCopy[17], pktCopy[18], pktCopy[19]}
 			rewriteL4Checksum(pktCopy[ipHeaderLen:], protocol, srcIPBytes, dstIPBytes)
 
-			if e.sendToTransport != nil {
-				e.sendToTransport(pktCopy)
+			owner.packetIn.Add(1)
+			owner.mu.Lock()
+			cb := owner.sendToTransport
+			owner.mu.Unlock()
+			if cb != nil {
+				cb(pktCopy)
 			}
 		}
 	}
+}
+
+// RawSocketEndpoint is one worker's gvisor-facing handle onto the shared
+// rawSocketCore - implements stack.LinkEndpoint so it can still be plugged
+// into that worker's own gvisor stack.Stack via CreateNIC (every worker
+// still has its own gvisor stack; only the underlying OS sockets are
+// shared), but every actual raw-socket operation goes through the one
+// shared core.
+type RawSocketEndpoint struct {
+	core       *rawSocketCore
+	dispatcher stack.NetworkDispatcher
+	nicID      tcpip.NICID
+	packetIn   atomic.Uint64
+	packetOut  atomic.Uint64
+
+	mu              sync.Mutex
+	sendToTransport func([]byte)
+}
+
+func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
+	core, err := getSharedRawCore()
+	if err != nil {
+		return nil, err
+	}
+	return &RawSocketEndpoint{core: core, nicID: nicID}, nil
+}
+
+func (e *RawSocketEndpoint) SetTransportSender(sendFunc func([]byte)) {
+	e.mu.Lock()
+	e.sendToTransport = sendFunc
+	e.mu.Unlock()
 }
 
 func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
@@ -184,7 +262,7 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 		pktCopy := make([]byte, len(ipPacket))
 		copy(pktCopy, ipPacket)
 
-		copy(pktCopy[12:16], e.localIP[:])
+		copy(pktCopy[12:16], e.core.localIP[:])
 
 		pktCopy[10] = 0
 		pktCopy[11] = 0
@@ -205,20 +283,21 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 		case 6:
 			if l4[13]&0x02 != 0 {
 				seqNum := uint32(l4[4])<<24 | uint32(l4[5])<<16 | uint32(l4[6])<<8 | uint32(l4[7])
-				e.outgoingSYNs.Store(seqNum, true)
-				e.activePorts.Store(srcPort, true)
+				e.core.outgoingSYNs.Store(seqNum, true)
+				e.core.activePorts.Store(srcPort, e)
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
 				dstPort := uint16(l4[2])<<8 | uint16(l4[3])
-				e.activePorts.Delete(dstPort)
+				e.core.activePorts.Delete(dstPort)
 			}
 		case 17:
 			// UDP has neither a handshake nor FIN/RST: the very first datagram opens the port and
-			// nothing closes it. The entry lives until the process exits — same as a TCP port
-			// whose session was torn down without a FIN. No reaper here on purpose: a tunnel
-			// session (a single client) sees tens of ports, and a lifetime timer would be a
-			// guess — there is no way to know how long a quiet UDP flow stays interesting.
-			e.activePorts.Store(srcPort, true)
+			// nothing closes it. The entry lives until this worker closes (see Close) or the
+			// process exits - same as a TCP port whose session was torn down without a FIN. No
+			// reaper here on purpose: a tunnel session (a single client) sees tens of ports, and a
+			// lifetime timer would be a guess — there is no way to know how long a quiet UDP flow
+			// stays interesting.
+			e.core.activePorts.Store(srcPort, e)
 		}
 
 		var dst [4]byte
@@ -229,7 +308,12 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 			Port: 0,
 		}
 
-		if err := syscall.Sendto(e.sendFd, pktCopy, 0, addr); err != nil {
+		// Sendto is one atomic syscall per packet - concurrent workers'
+		// goroutines calling it on the same shared fd don't interleave or
+		// corrupt each other's datagrams, so no additional locking is
+		// needed here beyond what already guarded a single worker's own
+		// fd before.
+		if err := syscall.Sendto(e.core.sendFd, pktCopy, 0, addr); err != nil {
 			utils.Debugf("[RAW-NIC%d] Sendto failed: %v", e.nicID, err)
 			continue
 		}
@@ -253,10 +337,26 @@ func (e *RawSocketEndpoint) IsAttached() bool                        { return e.
 func (e *RawSocketEndpoint) Wait()                                   {}
 func (e *RawSocketEndpoint) ARPHardwareType() header.ARPHardwareType { return header.ARPHardwareNone }
 func (e *RawSocketEndpoint) AddHeader(*stack.PacketBuffer)           {}
+
+// Close releases this worker's own registrations from the shared core - it
+// deliberately does NOT close the underlying OS sockets, which belong to
+// every other worker on this process too and outlive any one of them (see
+// rawSocketCore's doc comment). Sweeping activePorts here (rather than
+// leaving stale entries for the natural FIN/RST/process-exit paths to
+// eventually clear) matters more now than it used to: those entries used to
+// die along with a worker's own now-closed socket the moment it stopped
+// reading, but a shared socket keeps running for every other worker, so a
+// port this worker owned could otherwise keep pointing at its dead
+// sendToTransport indefinitely - harmless (Send on a stopped transport just
+// errors), but an unbounded leak across enough key churn over a long
+// uptime.
 func (e *RawSocketEndpoint) Close() {
-	syscall.Close(e.sendFd)
-	syscall.Close(e.recvFd)
-	syscall.Close(e.recvUDPFd)
+	e.core.activePorts.Range(func(key, value any) bool {
+		if value.(*RawSocketEndpoint) == e {
+			e.core.activePorts.Delete(key)
+		}
+		return true
+	})
 }
 func (e *RawSocketEndpoint) SetMTU(uint32)                        {}
 func (e *RawSocketEndpoint) SetLinkAddress(tcpip.LinkAddress)     {}

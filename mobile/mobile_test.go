@@ -8,13 +8,37 @@ import (
 	"universal-bypass-tool/transport/yandex"
 )
 
+// A plain "yandex" profile with no E2E encryption gets self-compression
+// enabled instead of an external transport.CompressedTransport wrapper (see
+// wrapYandex) - the returned type is the bare *yandex.YandexDocsTransport
+// either way, since self-compress mode doesn't wrap it in anything.
 func TestBuildTransportManualYandex(t *testing.T) {
-	trans, wrapped, err := buildTransport(Config{Mode: "manual", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
+	trans, err := buildTransport(Config{Mode: "manual", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
 	if err != nil {
 		t.Fatalf("buildTransport: %v", err)
 	}
-	if wrapped {
-		t.Errorf("plain yandex transport should not report itself as already wrapped")
+	if _, ok := trans.(*yandex.YandexDocsTransport); !ok {
+		t.Errorf("got %T, want *yandex.YandexDocsTransport", trans)
+	}
+}
+
+// A "yandex" profile WITH E2E encryption also gets self-compression (its
+// encrypted flavor - see wrapYandex/YandexDocsTransport.EnableEncryptedSelfCompression),
+// still with no external transport.EncryptedTransport/CompressedTransport
+// wrapping - the returned type is the same bare *yandex.YandexDocsTransport
+// either way. transport/yandex's own tests cover the actual encryption
+// behavior in depth; this only guards that buildTransport wires E2E config
+// through instead of silently ignoring it.
+func TestBuildTransportManualYandexWithE2EEncryption(t *testing.T) {
+	cfg := Config{
+		Mode:          "manual",
+		DocURL:        "https://docs.yandex.ru/x",
+		KeyToken:      "shared-secret-token",
+		E2EEncryption: true,
+	}
+	trans, err := buildTransport(cfg, transport.DefaultConfig())
+	if err != nil {
+		t.Fatalf("buildTransport: %v", err)
 	}
 	if _, ok := trans.(*yandex.YandexDocsTransport); !ok {
 		t.Errorf("got %T, want *yandex.YandexDocsTransport", trans)
@@ -22,37 +46,48 @@ func TestBuildTransportManualYandex(t *testing.T) {
 }
 
 func TestBuildTransportManualMissingDocURL(t *testing.T) {
-	if _, _, err := buildTransport(Config{Mode: "manual", Transport: "yandex"}, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(Config{Mode: "manual", Transport: "yandex"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error when doc_url is missing")
 	}
 }
 
+// volga doesn't manage its own compression (see wrapGeneric) - it's always
+// wrapped in transport.CompressedTransport, same as before this feature
+// existed.
 func TestBuildTransportManualVolga(t *testing.T) {
-	trans, _, err := buildTransport(Config{Mode: "manual", Transport: "volga", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
+	trans, err := buildTransport(Config{Mode: "manual", Transport: "volga", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
 	if err != nil {
 		t.Fatalf("buildTransport: %v", err)
 	}
-	if _, ok := trans.(*yandex.YandexVolgaTransport); !ok {
-		t.Errorf("got %T, want *yandex.YandexVolgaTransport", trans)
+	compressed, ok := trans.(*transport.CompressedTransport)
+	if !ok {
+		t.Fatalf("got %T, want *transport.CompressedTransport", trans)
+	}
+	if _, ok := compressed.Transport.(*yandex.YandexVolgaTransport); !ok {
+		t.Errorf("inner transport is %T, want *yandex.YandexVolgaTransport", compressed.Transport)
 	}
 }
 
 func TestBuildTransportVolgaMissingDocURL(t *testing.T) {
-	if _, _, err := buildTransport(Config{Mode: "manual", Transport: "volga"}, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(Config{Mode: "manual", Transport: "volga"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error when doc_url is missing")
 	}
 }
 
 func TestBuildTransportManualMax(t *testing.T) {
-	trans, _, err := buildTransport(
+	trans, err := buildTransport(
 		Config{Mode: "manual", Transport: "max", MaxToken: "tok", MaxUID: 12345},
 		transport.DefaultConfig(),
 	)
 	if err != nil {
 		t.Fatalf("buildTransport: %v", err)
 	}
-	if _, ok := trans.(*oneme.OneMeTransport); !ok {
-		t.Errorf("got %T, want *oneme.OneMeTransport", trans)
+	compressed, ok := trans.(*transport.CompressedTransport)
+	if !ok {
+		t.Fatalf("got %T, want *transport.CompressedTransport", trans)
+	}
+	if _, ok := compressed.Transport.(*oneme.OneMeTransport); !ok {
+		t.Errorf("inner transport is %T, want *oneme.OneMeTransport", compressed.Transport)
 	}
 }
 
@@ -62,20 +97,20 @@ func TestBuildTransportManualMaxMissingFields(t *testing.T) {
 		{Mode: "manual", Transport: "max", MaxToken: "tok"}, // no uid
 	}
 	for _, cfg := range cases {
-		if _, _, err := buildTransport(cfg, transport.DefaultConfig()); err == nil {
+		if _, err := buildTransport(cfg, transport.DefaultConfig()); err == nil {
 			t.Errorf("expected an error for %+v", cfg)
 		}
 	}
 }
 
 func TestBuildTransportUnsupportedTransport(t *testing.T) {
-	if _, _, err := buildTransport(Config{Mode: "manual", Transport: "carrier-pigeon", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(Config{Mode: "manual", Transport: "carrier-pigeon", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error for an unsupported transport")
 	}
 }
 
 func TestBuildTransportUnknownMode(t *testing.T) {
-	if _, _, err := buildTransport(Config{Mode: "telepathy"}, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(Config{Mode: "telepathy"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error for an unknown mode")
 	}
 }
@@ -85,7 +120,7 @@ func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
 	// token into a doc_url over a live, unshielded HTTPS request - removed
 	// because that request had no disguise and was trivial to block. Any
 	// caller still sending it should get a clear error, not silent misuse.
-	if _, _, err := buildTransport(Config{Mode: "key", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(Config{Mode: "key", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf(`expected an error for the removed "key" mode`)
 	}
 }
@@ -93,19 +128,20 @@ func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
 func TestBuildTransportMultiStream(t *testing.T) {
 	// KeyToken set but E2EEncryption left false (default): must still build
 	// successfully without encrypting - see E2EEncryption's doc comment on
-	// why a bare KeyToken alone must never turn encryption on.
+	// why a bare KeyToken alone must never turn encryption on. Each stream
+	// gets self-compression instead (no E2E, per wrapYandex), so the
+	// per-stream transports stay bare *yandex.YandexDocsTransport values,
+	// same as the single-stream case - only the outer MultiStreamTransport
+	// wrapper is visible here.
 	cfg := Config{
 		Mode:      "manual",
 		Transport: "yandex_multistream",
 		DocURLs:   []string{"https://docs.yandex.ru/a", "https://docs.yandex.ru/b", "https://docs.yandex.ru/c"},
 		KeyToken:  "shared-secret-token",
 	}
-	trans, wrapped, err := buildTransport(cfg, transport.DefaultConfig())
+	trans, err := buildTransport(cfg, transport.DefaultConfig())
 	if err != nil {
 		t.Fatalf("buildTransport: %v", err)
-	}
-	if !wrapped {
-		t.Errorf("yandex_multistream should report itself as already wrapped (it builds its own per-stream compression/encryption)")
 	}
 	if _, ok := trans.(*transport.MultiStreamTransport); !ok {
 		t.Errorf("got %T, want *transport.MultiStreamTransport", trans)
@@ -120,12 +156,9 @@ func TestBuildTransportMultiStreamWithE2EEncryption(t *testing.T) {
 		KeyToken:      "shared-secret-token",
 		E2EEncryption: true,
 	}
-	trans, wrapped, err := buildTransport(cfg, transport.DefaultConfig())
+	trans, err := buildTransport(cfg, transport.DefaultConfig())
 	if err != nil {
 		t.Fatalf("buildTransport: %v", err)
-	}
-	if !wrapped {
-		t.Errorf("wrapped = false, want true")
 	}
 	if _, ok := trans.(*transport.MultiStreamTransport); !ok {
 		t.Errorf("got %T, want *transport.MultiStreamTransport", trans)
@@ -134,7 +167,34 @@ func TestBuildTransportMultiStreamWithE2EEncryption(t *testing.T) {
 
 func TestBuildTransportMultiStreamRequiresAtLeastTwoURLs(t *testing.T) {
 	cfg := Config{Mode: "manual", Transport: "yandex_multistream", DocURLs: []string{"https://docs.yandex.ru/a"}}
-	if _, _, err := buildTransport(cfg, transport.DefaultConfig()); err == nil {
+	if _, err := buildTransport(cfg, transport.DefaultConfig()); err == nil {
 		t.Fatalf("expected an error with fewer than 2 doc_urls")
+	}
+}
+
+// StartSocks5Proxy doesn't actually need a reachable doc_url to exercise its
+// own lifecycle/mutual-exclusion logic: YandexDocsTransport.Start() launches
+// its connection attempt in a background goroutine and returns immediately
+// regardless of whether the URL is real (see yandex.go's Start/connectToDoc).
+func TestStartSocks5ProxyLifecycleAndMutualExclusion(t *testing.T) {
+	cfg := `{"mode":"manual","transport":"yandex","doc_url":"http://127.0.0.1:1"}`
+
+	if err := StartSocks5Proxy(cfg, "127.0.0.1:0", nil); err != nil {
+		t.Fatalf("StartSocks5Proxy: %v", err)
+	}
+	defer StopSocks5Proxy()
+
+	if err := StartSocks5Proxy(cfg, "127.0.0.1:0", nil); err == nil {
+		t.Fatal("expected an error starting a second SOCKS5 proxy while one is already running")
+	}
+	if err := StartTunnel(0, cfg, nil, nil); err == nil {
+		t.Fatal("expected an error starting a tunnel while a SOCKS5 proxy is running")
+	}
+
+	if err := StopSocks5Proxy(); err != nil {
+		t.Fatalf("StopSocks5Proxy: %v", err)
+	}
+	if err := StopSocks5Proxy(); err != nil {
+		t.Fatalf("a second StopSocks5Proxy should be a harmless no-op, got: %v", err)
 	}
 }

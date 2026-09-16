@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/chacha20poly1305"
 
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/utils"
@@ -52,6 +53,40 @@ const batchMarker = 0xFE
 // this transport plays (client vs exit node), is what writerLoop's flush
 // gates sending on - see peerBatches.
 const kaBatchCapabilityToken = "+batch1"
+
+// zstdBatchMarker flags a payload as EnableSelfCompression's whole-batch
+// format: raw (not yet per-packet-compressed) packets, length-prefixed and
+// zstd-compressed as one unit via transport.EncodeBatch - see
+// YandexDocsTransport.EnableSelfCompression's doc comment for why this beats
+// batchMarker's "batch of individually-LZ4'd packets" for the non-encrypted
+// case. Distinct from batchMarker (0xFE) and from the 0x00/0x1F a lone
+// transport.Compress'd packet's own first byte can be, so a peer that
+// understands one format never mistakes a frame in the other for its own -
+// see kaZstdBatchCapabilityToken for why sending is still gated separately
+// from merely picking a marker byte that doesn't collide.
+const zstdBatchMarker = 0xFD
+
+// kaZstdBatchCapabilityToken is kaBatchCapabilityToken's counterpart for
+// zstdBatchMarker - a peer's keepalive must carry this before this transport
+// ever sends it a zstd-whole-batch frame, exactly the same bootstrapping
+// rule batchMarker already established (see peerBatches). Appended after
+// kaBatchCapabilityToken in the same keepalive message; a peer that only
+// recognizes the older token (or neither) still matches "---KA---" and
+// "+batch1" as an exact substring each and ignores whatever trails after,
+// same as always.
+const kaZstdBatchCapabilityToken = "+zbatch1"
+
+// kaEncSelfCompressToken is kaZstdBatchCapabilityToken's counterpart for
+// EnableEncryptedSelfCompression specifically - see that method's doc
+// comment for why understanding zstdBatchMarker in general (peerZstdBatches)
+// isn't enough to prove a peer also does encrypted self-compression for a
+// given e2e_encryption key: sending this token is conditional on this
+// transport instance actually being in that mode (see keepAliveLoop),
+// unlike kaBatchCapabilityToken/kaZstdBatchCapabilityToken, which every
+// instance sends unconditionally regardless of what it uses them for.
+// Appended after the other two tokens in the same keepalive; ignored the
+// same way by any peer that doesn't recognize it.
+const kaEncSelfCompressToken = "+encsc1"
 
 const (
 	ydocsBatchSize     = 20
@@ -153,9 +188,131 @@ type YandexDocsTransport struct {
 	// something the other side can't parse.
 	peerBatches atomic.Bool
 
+	// peerZstdBatches is peerBatches' counterpart for zstdBatchMarker - see
+	// kaZstdBatchCapabilityToken.
+	peerZstdBatches atomic.Bool
+
+	// selfCompress is EnableSelfCompression's/EnableEncryptedSelfCompression's
+	// flag - set at most once, before Start, never written again afterward
+	// (same contract as SetEventCallback's), so reading it from
+	// writerLoop/handleMessage's goroutines without a lock is safe. Same for
+	// encrypted/encSend/encRecv below.
+	selfCompress bool
+
+	// encrypted, encSend, encRecv, encSendCtr are
+	// EnableEncryptedSelfCompression's state - encrypted is false unless that
+	// (not the plain EnableSelfCompression) was called; encSend/encRecv are
+	// this connection's derived ChaCha20-Poly1305 keys (see
+	// transport.DeriveDirectionalKeys), and encSendCtr is this side's own
+	// nonce counter, independent of any external transport.EncryptedTransport
+	// instance (there is none in this mode).
+	encrypted  bool
+	encSend    [chacha20poly1305.KeySize]byte
+	encRecv    [chacha20poly1305.KeySize]byte
+	encSendCtr atomic.Uint64
+
+	// peerEncSelfCompress is peerZstdBatches' counterpart specifically for
+	// EnableEncryptedSelfCompression - see kaEncSelfCompressToken's doc
+	// comment for why peerZstdBatches alone isn't enough proof for the
+	// encrypted case.
+	peerEncSelfCompress atomic.Bool
+
 	// wakeReconnect, guarded by Mu, is non-nil exactly while scheduleReconnect
 	// is sleeping out a backoff delay between attempts - see ForceReconnect.
 	wakeReconnect chan struct{}
+}
+
+// EnableSelfCompression switches this transport into managing its own
+// per-batch compression (see writerLoop/handleMessage) instead of expecting
+// a caller-side transport.CompressedTransport to compress each packet
+// before Send ever sees it. Call before Start; changing this after is not
+// safe (same contract as SetEventCallback).
+//
+// Why this exists: transport.CompressedTransport compresses one packet at a
+// time, before writerLoop ever groups packets into a batch - LZ4 on each
+// packet in isolation misses the redundancy between packets in the same
+// batch (repeated headers, similar payloads) that compressing the whole
+// batch at once would catch, and pays a full LZ4 frame's overhead per
+// packet instead of once per batch. Once a peer's keepalive proves it
+// understands zstdBatchMarker (see kaZstdBatchCapabilityToken), writerLoop
+// switches to framing a whole batch of RAW packets and zstd-compressing
+// that as one unit (transport.EncodeBatch) - strictly more efficient, never
+// less, than compressing each packet alone. Until then (or against a peer
+// that never upgrades) it reproduces transport.CompressedTransport's exact
+// per-packet format itself, so wire compatibility with an unmodified peer
+// is unaffected either way.
+//
+// NOT used together with transport.CompressedTransport: a caller enabling
+// this must not also wrap this transport in CompressedTransport, or packets
+// get compressed twice on send and the receive side (which now decompresses
+// internally - see handleMessage) would be handed already-decompressed
+// bytes a second time. For a key with end-to-end encryption on, use
+// EnableEncryptedSelfCompression instead - not this plus a separate
+// transport.EncryptedTransport wrapper, which would encrypt this method's
+// own batching decisions no differently than any other opaque bytes and
+// lose the whole point (see that method's doc comment). See
+// mobile.buildTransport and nodeagent.Orchestrator.startWorker for the
+// actual call sites and how they pick between the two.
+func (t *YandexDocsTransport) EnableSelfCompression() {
+	t.selfCompress = true
+}
+
+// EnableEncryptedSelfCompression is EnableSelfCompression plus end-to-end
+// encryption, for a key with e2e_encryption on. token/isExitNode derive the
+// same keys transport.NewEncryptedTransport would (see
+// transport.DeriveDirectionalKeys) - both ends must call this with the same
+// token and opposite isExitNode. Call before Start; changing this after is
+// not safe (same contract as EnableSelfCompression).
+//
+// Why a whole-batch encrypted format needs its own method rather than just
+// wrapping EnableSelfCompression's output in transport.EncryptedTransport
+// externally: encrypting each packet before batching (what
+// transport.CompressedTransport(transport.EncryptedTransport(...)) does
+// today) destroys exactly the cross-packet redundancy batching whole raw
+// packets before compressing was meant to exploit - ChaCha20-Poly1305
+// ciphertext is high-entropy by design, so zstd would find nothing to
+// compress in a batch of already-encrypted packets. This method instead
+// batches and zstd-compresses RAW packets first (transport.EncodeBatch, same
+// as EnableSelfCompression) and encrypts the WHOLE compressed batch as one
+// unit (transport.Seal) - encryption still only ever seals already-compressed
+// bytes, same invariant transport.EncryptedTransport's doc comment
+// describes, just applied to a batch instead of one packet.
+//
+// Compatibility works the same way as EnableSelfCompression, with one added
+// wrinkle: understanding zstdBatchMarker in general (peerZstdBatches) does
+// NOT prove a peer also does ENCRYPTED self-compression for this specific
+// key - a peer can easily be running code new enough for one but still using
+// the traditional transport.CompressedTransport(transport.EncryptedTransport(...))
+// wrapping for an e2e_encryption key (that's what happens without this
+// method), so this is gated by its own separate capability token,
+// kaEncSelfCompressToken, sent only by an instance actually in this mode.
+// Until a peer proves it (or if it never does), this reproduces the
+// traditional wrapping's EXACT wire format itself: encrypt each
+// transport.Compress'd packet independently (transport.Seal on the
+// compressed bytes, matching transport.EncryptedTransport.Send byte for
+// byte) before batching those ciphertexts the old way - so an unmodified
+// peer using the external-wrapper architecture for this same key can decrypt
+// and decompress it with no changes on its end, exactly like
+// EnableSelfCompression's own fallback. Receiving is unconditional either
+// way (see handleMessage): this side's own key derivation lets it decrypt
+// either format from any peer that shares the same token, whether or not
+// that peer is itself using this method.
+func (t *YandexDocsTransport) EnableEncryptedSelfCompression(token string, isExitNode bool) {
+	t.enableEncryptedSelfCompression(token, isExitNode, "")
+}
+
+// EnableEncryptedSelfCompressionForStream is
+// EnableEncryptedSelfCompression for one stream of a MultiStreamTransport -
+// see transport.NewEncryptedTransportForStream's doc comment on why each
+// stream needs its own derived key.
+func (t *YandexDocsTransport) EnableEncryptedSelfCompressionForStream(token string, isExitNode bool, streamIndex int) {
+	t.enableEncryptedSelfCompression(token, isExitNode, fmt.Sprintf(" stream %d", streamIndex))
+}
+
+func (t *YandexDocsTransport) enableEncryptedSelfCompression(token string, isExitNode bool, infoSuffix string) {
+	t.selfCompress = true
+	t.encrypted = true
+	t.encSend, t.encRecv = transport.DeriveDirectionalKeys(token, isExitNode, infoSuffix)
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
@@ -449,9 +606,65 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 		if len(batch) == 0 {
 			return
 		}
-		if t.peerBatches.Load() {
+		switch {
+		case t.encrypted && t.peerEncSelfCompress.Load():
+			// batch holds RAW packets - frame+zstd-compress the whole thing
+			// as one unit, then encrypt THAT as one unit - see
+			// EnableEncryptedSelfCompression.
+			t.sendEncryptedZstdBatch(session, batch)
+		case t.encrypted:
+			// Peer hasn't (yet, or ever) proven it does encrypted
+			// self-compression for this key - reproduce
+			// transport.CompressedTransport(transport.EncryptedTransport(...))'s
+			// exact per-packet format ourselves: compress, then encrypt,
+			// each packet independently, before falling back to the
+			// existing legacy batch/single path with the resulting
+			// ciphertexts - so an unmodified peer using that external
+			// wrapping for this same key can decrypt and decompress it
+			// with no changes on its end.
+			sealed := make([][]byte, 0, len(batch))
+			for _, pkt := range batch {
+				ciphertext, err := transport.Seal(t.encSend, t.encSendCtr.Add(1), transport.Compress(pkt))
+				if err != nil {
+					utils.Debugf("[YDOCS] encrypt failed, dropping packet: %v", err)
+					continue
+				}
+				sealed = append(sealed, ciphertext)
+			}
+			if len(sealed) > 0 {
+				if t.peerBatches.Load() {
+					t.sendBatch(session, sealed)
+				} else {
+					for _, pkt := range sealed {
+						t.sendSingle(session, pkt)
+					}
+				}
+			}
+		case t.selfCompress && t.peerZstdBatches.Load():
+			// batch holds RAW packets in self-compress mode (nothing
+			// upstream compressed them - see EnableSelfCompression) - frame
+			// and zstd-compress the whole thing as one unit.
+			t.sendZstdBatch(session, batch)
+		case t.selfCompress:
+			// Peer hasn't (yet, or ever) proven it understands
+			// zstdBatchMarker - reproduce transport.CompressedTransport's
+			// exact per-packet format ourselves before falling back to the
+			// existing legacy batch/single path, so the bytes on the wire
+			// are identical to what an unmodified peer already expects.
+			compressed := make([][]byte, len(batch))
+			for i, pkt := range batch {
+				compressed[i] = transport.Compress(pkt)
+			}
+			if t.peerBatches.Load() {
+				t.sendBatch(session, compressed)
+			} else {
+				for _, pkt := range compressed {
+					t.sendSingle(session, pkt)
+				}
+			}
+		case t.peerBatches.Load():
 			t.sendBatch(session, batch)
-		} else {
+		default:
 			for _, pkt := range batch {
 				t.sendSingle(session, pkt)
 			}
@@ -515,17 +728,72 @@ func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 
 	t.markSent(framed)
 	if utils.IsVerbose() {
-		// framed is whatever the caller handed to Send() for each packet in
-		// batch, length-prefixed and concatenated - when wrapped in
-		// transport.CompressedTransport (the normal case), that's
-		// already-compressed bytes, not raw IP packets, so parsing it here
-		// would print convincing-looking nonsense instead of failing
-		// loudly. Byte/packet counts are the only things safe to claim
-		// about it at this layer.
+		// batch's items are already-processed, opaque-to-this-function bytes
+		// by the time they get here - compressed (by an external
+		// transport.CompressedTransport, or by writerLoop's own self-compress
+		// fallback), and for an encrypted transport's fallback, sealed on top
+		// of that too - never raw IP packets, so parsing them here would
+		// print convincing-looking nonsense instead of failing loudly.
+		// Byte/packet counts are the only things safe to claim at this layer.
 		utils.Debugf("[YDOCS] -> %d bytes (%d packets)\n", len(framed), len(batch))
 	}
 
 	payload := base64.StdEncoding.EncodeToString(framed)
+	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+
+	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+		utils.Debugf("[YDOCS] Write error: %v", err)
+	}
+}
+
+// sendZstdBatch frames batch (RAW packets - see EnableSelfCompression) with
+// zstdBatchMarker + transport.EncodeBatch's whole-batch zstd encoding,
+// base64s it, and writes it as a single "cursor" message. Only called once
+// the peer's keepalive has proven it understands zstdBatchMarker - see
+// kaZstdBatchCapabilityToken.
+func (t *YandexDocsTransport) sendZstdBatch(session *DocSession, batch [][]byte) {
+	encoded := transport.EncodeBatch(batch)
+	framed := make([]byte, 1+len(encoded))
+	framed[0] = zstdBatchMarker
+	copy(framed[1:], encoded)
+
+	t.markSent(framed)
+	if utils.IsVerbose() {
+		utils.Debugf("[YDOCS] -> %d bytes (%d packets, zstd batch)\n", len(framed), len(batch))
+	}
+
+	payload := base64.StdEncoding.EncodeToString(framed)
+	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
+
+	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
+		utils.Debugf("[YDOCS] Write error: %v", err)
+	}
+}
+
+// sendEncryptedZstdBatch is sendZstdBatch plus encryption: the same
+// [zstdBatchMarker][transport.EncodeBatch(batch)] plaintext, sealed as one
+// unit with transport.Seal before going on the wire - see
+// EnableEncryptedSelfCompression's doc comment. Only called once the peer's
+// keepalive has proven it understands this format - see
+// kaEncSelfCompressToken.
+func (t *YandexDocsTransport) sendEncryptedZstdBatch(session *DocSession, batch [][]byte) {
+	encoded := transport.EncodeBatch(batch)
+	plaintext := make([]byte, 1+len(encoded))
+	plaintext[0] = zstdBatchMarker
+	copy(plaintext[1:], encoded)
+
+	ciphertext, err := transport.Seal(t.encSend, t.encSendCtr.Add(1), plaintext)
+	if err != nil {
+		utils.Debugf("[YDOCS] encrypt failed, dropping batch: %v", err)
+		return
+	}
+
+	t.markSent(ciphertext)
+	if utils.IsVerbose() {
+		utils.Debugf("[YDOCS] -> %d bytes (%d packets, encrypted zstd batch)\n", len(ciphertext), len(batch))
+	}
+
+	payload := base64.StdEncoding.EncodeToString(ciphertext)
 	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
@@ -596,11 +864,22 @@ func (t *YandexDocsTransport) wasRecentlySent(data []byte) bool {
 func (t *YandexDocsTransport) keepAliveLoop() {
 	ticker := time.NewTicker(t.GetConfig().KeepAliveInterval)
 	defer ticker.Stop()
-	// The trailing token rides inside the existing "---KA---" keepalive
-	// (still an exact substring, so a not-yet-updated peer's own
-	// strings.Contains(text, "---KA---") still matches and ignores it same
-	// as always) - see peerBatches and kaBatchCapabilityToken.
-	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---` + kaBatchCapabilityToken + `"}]`
+	// All trailing tokens ride inside the existing "---KA---" keepalive
+	// (still an exact substring each, so a peer understanding only some - or
+	// none - still matches "---KA---" and whichever token(s) it knows, and
+	// ignores the rest same as always) - see
+	// peerBatches/peerZstdBatches/peerEncSelfCompress and
+	// kaBatchCapabilityToken/kaZstdBatchCapabilityToken/kaEncSelfCompressToken.
+	// Unlike the other two (sent unconditionally by every instance),
+	// kaEncSelfCompressToken is conditional on t.encrypted - see that
+	// constant's doc comment on why it has to specifically prove THIS
+	// instance is in encrypted self-compression mode, not just that its code
+	// understands the format in general.
+	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---` + kaBatchCapabilityToken + kaZstdBatchCapabilityToken
+	if t.encrypted {
+		keepAliveMsg += kaEncSelfCompressToken
+	}
+	keepAliveMsg += `"}]`
 
 	for t.IsRunning() {
 		<-ticker.C
@@ -628,6 +907,12 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 	if strings.Contains(text, "---KA---") {
 		if strings.Contains(text, kaBatchCapabilityToken) {
 			t.peerBatches.Store(true)
+		}
+		if strings.Contains(text, kaZstdBatchCapabilityToken) {
+			t.peerZstdBatches.Store(true)
+		}
+		if strings.Contains(text, kaEncSelfCompressToken) {
+			t.peerEncSelfCompress.Store(true)
 		}
 		return
 	}
@@ -675,19 +960,137 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 
 		t.RecordReceive(len(decoded))
 
-		// batchMarker (see sendBatch) flags decoded as several
-		// length-prefixed packets rather than one lone payload - the
-		// framing a not-yet-updated peer's packets never carry (compress()
-		// only ever emits 0x00/0x1F as its own first byte), so this stays
-		// correct talking to either version of this transport.
-		if len(decoded) > 0 && decoded[0] == batchMarker {
-			for _, pkt := range decodeBatch(decoded[1:]) {
+		if t.encrypted {
+			t.handleEncryptedMessage(decoded)
+			return
+		}
+
+		// zstdBatchMarker (see sendZstdBatch) flags decoded as
+		// EnableSelfCompression's whole-batch format: RAW packets, framed
+		// and zstd-compressed as one unit. Only ever sent to a peer that
+		// already proved (via keepalive) it understands this, but decoding
+		// it doesn't depend on our OWN t.selfCompress - a peer capable of
+		// sending it is, by construction, also capable of receiving the
+		// plain packets this yields, so handing them straight to
+		// CallReceive is correct regardless of which mode this side itself
+		// is in.
+		if len(decoded) > 0 && decoded[0] == zstdBatchMarker {
+			pkts, err := transport.DecodeBatch(decoded[1:])
+			if err != nil {
+				utils.Debugf("[YDOCS] zstd batch decode error: %v", err)
+				return
+			}
+			for _, pkt := range pkts {
 				t.CallReceive(pkt)
 			}
 			return
 		}
-		t.CallReceive(decoded)
+
+		// batchMarker (see sendBatch) flags decoded as several
+		// length-prefixed packets rather than one lone payload - the
+		// framing a not-yet-updated peer's packets never carry
+		// (transport.Compress only ever emits 0x00/0x1F as its own first
+		// byte), so this stays correct talking to either version of this
+		// transport. Each item here is still in transport.Compress's
+		// per-packet format either way (that's what sendBatch always
+		// batches, self-compress mode included - see writerLoop's flush);
+		// self-compress mode has no external transport.CompressedTransport
+		// to undo that for it, so it must do so itself before handing raw
+		// packets upward - a non-self-compress transport must NOT, since
+		// its own external CompressedTransport.Receive still expects to do
+		// that decompression itself, same as always.
+		if len(decoded) > 0 && decoded[0] == batchMarker {
+			for _, pkt := range decodeBatch(decoded[1:]) {
+				if !t.selfCompress {
+					t.CallReceive(pkt)
+					continue
+				}
+				raw, err := transport.Decompress(pkt)
+				if err != nil {
+					utils.Debugf("[YDOCS] batch item decompress error: %v", err)
+					continue
+				}
+				t.CallReceive(raw)
+			}
+			return
+		}
+
+		if !t.selfCompress {
+			t.CallReceive(decoded)
+			return
+		}
+		raw, err := transport.Decompress(decoded)
+		if err != nil {
+			utils.Debugf("[YDOCS] decompress error: %v", err)
+			return
+		}
+		t.CallReceive(raw)
 	}
+}
+
+// handleEncryptedMessage is handleMessage's dispatch once decoded (still
+// base64-decoded wire bytes, self-echo already ruled out) is known to belong
+// to an EnableEncryptedSelfCompression'd transport - every path here ends in
+// a decrypt, but AT A DIFFERENT POINT depending on which of the three wire
+// formats EnableEncryptedSelfCompression's doc comment describes actually
+// arrived:
+//
+//   - the legacy per-item fallback (writerLoop's "t.encrypted" branch when
+//     the peer hasn't confirmed kaEncSelfCompressToken) has an UNENCRYPTED,
+//     structurally-visible batchMarker wrapping individually encrypted
+//     items - each has to be decrypted (and then decompressed) separately,
+//     the same as an unmodified peer's own external
+//     transport.EncryptedTransport would for each one;
+//   - the new whole-batch format (sendEncryptedZstdBatch) and the old
+//     single-item fallback both have NO visible structure at all - the
+//     entire blob is ciphertext, and only decrypting it reveals which of
+//     the two it is (zstdBatchMarker as the plaintext's first byte, or not).
+//
+// Decrypting the wrong span (e.g. attempting to decrypt the whole
+// batchMarker-wrapped blob as one unit) would just fail authentication and
+// drop everything - this dispatch exists specifically so that never happens.
+func (t *YandexDocsTransport) handleEncryptedMessage(decoded []byte) {
+	if len(decoded) > 0 && decoded[0] == batchMarker {
+		for _, item := range decodeBatch(decoded[1:]) {
+			plain, err := transport.Open(t.encRecv, item)
+			if err != nil {
+				utils.Debugf("[YDOCS] batch item decrypt failed: %v", err)
+				continue
+			}
+			raw, err := transport.Decompress(plain)
+			if err != nil {
+				utils.Debugf("[YDOCS] batch item decompress error: %v", err)
+				continue
+			}
+			t.CallReceive(raw)
+		}
+		return
+	}
+
+	plaintext, err := transport.Open(t.encRecv, decoded)
+	if err != nil {
+		utils.Debugf("[YDOCS] decrypt failed - dropping message: %v", err)
+		return
+	}
+
+	if len(plaintext) > 0 && plaintext[0] == zstdBatchMarker {
+		pkts, err := transport.DecodeBatch(plaintext[1:])
+		if err != nil {
+			utils.Debugf("[YDOCS] encrypted zstd batch decode error: %v", err)
+			return
+		}
+		for _, pkt := range pkts {
+			t.CallReceive(pkt)
+		}
+		return
+	}
+
+	raw, err := transport.Decompress(plaintext)
+	if err != nil {
+		utils.Debugf("[YDOCS] decompress error: %v", err)
+		return
+	}
+	t.CallReceive(raw)
 }
 
 func (t *YandexDocsTransport) extractBase64String(response string) string {
@@ -777,11 +1180,17 @@ func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, 
 func (t *YandexDocsTransport) ForceReconnect() {
 	t.Mu.Lock()
 	session := t.session
+	// t.session is never nil'd on disconnect (see connectToDoc/writerLoop's
+	// comment on the same fact) - it keeps pointing at the last session,
+	// live or not, so session != nil alone can't tell "connected right now"
+	// apart from "sleeping out a backoff with a stale session left over".
+	// IsConnected() is the field that actually tracks that distinction.
+	live := t.IsConnected()
 	wake := t.wakeReconnect
 	t.wakeReconnect = nil // claimed here, under the same lock, so a second concurrent call can't double-close wake below
 	t.Mu.Unlock()
 
-	if session != nil && session.Conn != nil {
+	if live && session != nil && session.Conn != nil {
 		utils.Debugf("[YDOCS] force-reconnect: dropping live session to re-dial")
 		_ = session.Conn.Close()
 		return

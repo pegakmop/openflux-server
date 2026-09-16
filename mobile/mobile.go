@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"universal-bypass-tool/gateway"
+	"universal-bypass-tool/socks5"
 	"universal-bypass-tool/transport"
 	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/yandex"
@@ -145,6 +146,17 @@ var (
 	current *session
 )
 
+type socks5Session struct {
+	trans  transport.Transport
+	tun    *tunnel.TCPTunnel
+	server *socks5.SOCKS5Server
+}
+
+var (
+	socksMu      sync.Mutex
+	currentSocks *socks5Session
+)
+
 // StartTunnel brings up a full client tunnel bound to tunFd - a TUN file
 // descriptor already established by the caller's VpnService - and relays
 // its traffic through the transport described by configJSON. Only one
@@ -153,9 +165,14 @@ var (
 func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback) error {
 	mu.Lock()
 	defer mu.Unlock()
-
+	socksMu.Lock()
+	running := currentSocks != nil
+	socksMu.Unlock()
 	if current != nil {
 		return fmt.Errorf("a tunnel is already running; call StopTunnel first")
+	}
+	if running {
+		return fmt.Errorf("a SOCKS5 proxy is already running; call StopSocks5Proxy first")
 	}
 
 	var cfg Config
@@ -185,16 +202,9 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	notify(cb, "connecting")
 
 	transportConfig := transport.DefaultConfig()
-	trans, wrapped, err := buildTransport(cfg, transportConfig)
+	trans, err := buildTransport(cfg, transportConfig)
 	if err != nil {
 		return fail(cb, err)
-	}
-
-	if !wrapped {
-		if cfg.E2EEncryption && cfg.KeyToken != "" {
-			trans = transport.NewEncryptedTransport(trans, cfg.KeyToken, false)
-		}
-		trans = transport.NewCompressedTransport(trans)
 	}
 	trans.SetEventCallback(func(code, detail string) {
 		if cb != nil {
@@ -273,13 +283,110 @@ func StopTunnel() error {
 	return nil
 }
 
-// buildTransport picks and constructs the transport for cfg. wrapped
-// reports whether it already carries its own compression/encryption
-// (yandex_multistream does this per-stream) - StartTunnel skips its own
-// wrapping when true.
-func buildTransport(cfg Config, transportConfig transport.TransportConfig) (trans transport.Transport, wrapped bool, err error) {
+// StartSocks5Proxy brings up a local SOCKS5 (CONNECT-only, TCP, no auth)
+// proxy on listenAddr (e.g. "127.0.0.1:1080") and relays every connection
+// made to it through the transport described by configJSON - the same
+// transport/tunnel stack StartTunnel uses, minus the TUN/VpnService/gateway
+// layer. Unlike StartTunnel this doesn't capture the device's traffic at
+// all: only whatever the caller explicitly points at listenAddr goes through
+// it, so no VPN permission and no Protector is needed here - there's no
+// self-created tunnel interface for this process's own connections to loop
+// back into. Only one of StartTunnel/StartSocks5Proxy runs at a time; call
+// the matching Stop function first to switch between them.
+//
+// A SOCKS5 CONNECT target's hostname (not just a literal IP) is resolved by
+// the device's normal DNS resolver before the connection ever reaches the
+// tunnel - same as the desktop client's --socks5 mode (see
+// socks5.SOCKS5Server/tunnel.TCPTunnel.DialTCP) - only the resulting IP
+// traffic is tunneled, not the DNS lookup itself.
+func StartSocks5Proxy(configJSON string, listenAddr string, cb Callback) error {
+	socksMu.Lock()
+	defer socksMu.Unlock()
+	mu.Lock()
+	running := current != nil
+	mu.Unlock()
+	if currentSocks != nil {
+		return fmt.Errorf("a SOCKS5 proxy is already running; call StopSocks5Proxy first")
+	}
+	if running {
+		return fmt.Errorf("a tunnel is already running; call StopTunnel first")
+	}
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return fail(cb, fmt.Errorf("parse config: %w", err))
+	}
+
+	utils.SetVerbose(cfg.VerboseLogging)
+	if cfg.VerboseLogging {
+		utils.SetLogSink(func(line string) {
+			if cb != nil {
+				cb.OnRawLog(line)
+			}
+		})
+	} else {
+		utils.SetLogSink(nil)
+	}
+
+	notify(cb, "connecting")
+
+	transportConfig := transport.DefaultConfig()
+	trans, err := buildTransport(cfg, transportConfig)
+	if err != nil {
+		return fail(cb, err)
+	}
+	trans.SetEventCallback(func(code, detail string) {
+		if cb != nil {
+			cb.OnLogEvent(code, detail)
+		}
+	})
+
+	if err := trans.Start(); err != nil {
+		return fail(cb, fmt.Errorf("start transport: %w", err))
+	}
+
+	tun := tunnel.NewTCPTunnel(trans, false)
+	server := socks5.NewSOCKS5Server(listenAddr, tun)
+
+	s := &socks5Session{trans: trans, tun: tun, server: server}
+	currentSocks = s
+
+	go func() {
+		if err := server.Start(); err != nil {
+			utils.Debugf("[SOCKS5] server stopped: %v", err)
+		}
+	}()
+
+	notify(cb, "connected")
+	return nil
+}
+
+// StopSocks5Proxy tears down the currently running SOCKS5 proxy, if any.
+// Safe to call when nothing is running.
+func StopSocks5Proxy() error {
+	socksMu.Lock()
+	s := currentSocks
+	currentSocks = nil
+	socksMu.Unlock()
+
+	utils.SetLogSink(nil)
+
+	if s == nil {
+		return nil
+	}
+
+	s.server.Stop()
+	s.trans.Stop()
+	s.tun.Close()
+	return nil
+}
+
+// buildTransport picks, constructs, and fully wires (compression/encryption
+// included - see wrapYandex/wrapGeneric) the transport for cfg. The result
+// is ready for Start; callers don't need to wrap it any further.
+func buildTransport(cfg Config, transportConfig transport.TransportConfig) (transport.Transport, error) {
 	if cfg.Mode != "manual" {
-		return nil, false, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
+		return nil, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
 	}
 
 	t := cfg.Transport
@@ -289,35 +396,66 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 	switch t {
 	case "yandex":
 		if cfg.DocURL == "" {
-			return nil, false, fmt.Errorf("doc_url is required")
+			return nil, fmt.Errorf("doc_url is required")
 		}
-		return yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), false, nil
+		return wrapYandex(yandex.NewYandexDocsTransport(cfg.DocURL, transportConfig), cfg, -1), nil
 	case "volga":
 		if cfg.DocURL == "" {
-			return nil, false, fmt.Errorf("doc_url is required")
+			return nil, fmt.Errorf("doc_url is required")
 		}
-		return yandex.NewYandexVolgaTransport(cfg.DocURL, transportConfig), false, nil
+		return wrapGeneric(yandex.NewYandexVolgaTransport(cfg.DocURL, transportConfig), cfg), nil
 	case "max":
 		if cfg.MaxToken == "" || cfg.MaxUID == 0 {
-			return nil, false, fmt.Errorf("the max transport requires max_token and max_uid")
+			return nil, fmt.Errorf("the max transport requires max_token and max_uid")
 		}
-		return oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), false, nil
+		return wrapGeneric(oneme.NewOneMeTransport(false, cfg.MaxToken, cfg.MaxUID, transportConfig), cfg), nil
 	case "yandex_multistream":
 		if len(cfg.DocURLs) < 2 {
-			return nil, false, fmt.Errorf("yandex_multistream requires at least 2 doc_urls")
+			return nil, fmt.Errorf("yandex_multistream requires at least 2 doc_urls")
 		}
 		streams := make([]transport.Transport, len(cfg.DocURLs))
 		for i, url := range cfg.DocURLs {
-			var st transport.Transport = yandex.NewYandexDocsTransport(url, transportConfig)
-			if cfg.E2EEncryption && cfg.KeyToken != "" {
-				st = transport.NewEncryptedTransportForStream(st, cfg.KeyToken, false, i)
-			}
-			streams[i] = transport.NewCompressedTransport(st)
+			streams[i] = wrapYandex(yandex.NewYandexDocsTransport(url, transportConfig), cfg, i)
 		}
-		return transport.NewMultiStreamTransport(streams), true, nil
+		return transport.NewMultiStreamTransport(streams), nil
 	default:
-		return nil, false, fmt.Errorf("unsupported transport %q for this client", t)
+		return nil, fmt.Errorf("unsupported transport %q for this client", t)
 	}
+}
+
+// wrapYandex applies this profile's E2E setting to a Yandex transport.
+// streamIdx selects the per-stream key derivation for one leg of a
+// yandex_multistream profile (matching nodeagent's own per-stream keying,
+// so both ends derive the same per-stream keys); -1 means the
+// single-stream case. Either way, yd manages its own compression (and, with
+// encryption on, its own encryption) internally rather than being wrapped in
+// anything - see YandexDocsTransport.EnableSelfCompression and
+// EnableEncryptedSelfCompression's doc comments for why that's strictly
+// better than the traditional transport.CompressedTransport(transport.EncryptedTransport(...))
+// wrapping (never worse, and better once the peer's keepalive proves it
+// also upgraded) while remaining fully compatible with a peer still using
+// that traditional wrapping.
+func wrapYandex(yd *yandex.YandexDocsTransport, cfg Config, streamIdx int) transport.Transport {
+	if !cfg.E2EEncryption || cfg.KeyToken == "" {
+		yd.EnableSelfCompression()
+		return yd
+	}
+	if streamIdx >= 0 {
+		yd.EnableEncryptedSelfCompressionForStream(cfg.KeyToken, false, streamIdx)
+	} else {
+		yd.EnableEncryptedSelfCompression(cfg.KeyToken, false)
+	}
+	return yd
+}
+
+// wrapGeneric applies E2E encryption (if configured), then compression, to
+// any transport that doesn't manage its own the way Yandex now can - volga
+// and max, unchanged from before this feature existed.
+func wrapGeneric(inner transport.Transport, cfg Config) transport.Transport {
+	if cfg.E2EEncryption && cfg.KeyToken != "" {
+		inner = transport.NewEncryptedTransport(inner, cfg.KeyToken, false)
+	}
+	return transport.NewCompressedTransport(inner)
 }
 
 // sitePolicy turns the client config's site-split fields into the gateway's

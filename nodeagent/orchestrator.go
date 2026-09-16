@@ -166,6 +166,12 @@ func (o *Orchestrator) pollLoop(ctx context.Context) {
 	}
 }
 
+// workerStartStagger spaces out starting brand-new workers discovered in the
+// same reconcile pass - see reconcile's doc comment on why bursting them all
+// at once is worth avoiding even though each individual start is cheap and
+// non-blocking.
+const workerStartStagger = 150 * time.Millisecond
+
 func (o *Orchestrator) reconcile(ctx context.Context) {
 	keys, err := o.client.ListKeys(ctx)
 	if err != nil {
@@ -179,8 +185,6 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	}
 
 	o.mu.Lock()
-	defer o.mu.Unlock()
-
 	for id, w := range o.workers {
 		if _, stillActive := active[id]; !stillActive {
 			utils.Debugf("[NODEAGENT] stopping worker for key %s (no longer active)", id)
@@ -189,6 +193,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 		}
 	}
 
+	var toStart []RemoteKey
 	for id, k := range active {
 		if _, exists := o.workers[id]; exists {
 			continue
@@ -201,21 +206,104 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 			utils.Debugf("[NODEAGENT] skipping key %s: yandex_multistream needs 2+ doc_urls, got %d", id, len(k.DocURLs))
 			continue
 		}
+		toStart = append(toStart, k)
+	}
+	o.mu.Unlock()
+
+	// Staggered and outside o.mu: starting many keys' WebSocket-based
+	// transports in the same instant - a cold start, or catching up after a
+	// control-plane hiccup queued up many changes at once - bursts dozens to
+	// hundreds of near-simultaneous outbound HTTPS/WSS connections from this
+	// one exit-node IP at the same covert-channel provider. Every worker
+	// already on this node keeps running fine either way (this only touches
+	// keys not already up), so spreading new ones out over time costs
+	// nothing at steady state and removes a self-inflicted CPU/handshake
+	// spike that also looks exactly like the automated traffic pattern
+	// these providers' own bot detection exists to catch (see
+	// yandex.go's fetchDocInfo CAPTCHA handling). Not holding o.mu during
+	// the wait matters at scale: usageLoop/heartbeatLoop must keep running
+	// against the workers already up while a large batch of new ones is
+	// still trickling in.
+	for i, k := range toStart {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(workerStartStagger):
+			}
+		}
 
 		w, err := o.startWorker(k)
 		if err != nil {
-			utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", id, err)
+			utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", k.ID, err)
 			continue
 		}
-		utils.Debugf("[NODEAGENT] started worker for key %s", id)
-		o.workers[id] = w
+		utils.Debugf("[NODEAGENT] started worker for key %s", k.ID)
+
+		o.mu.Lock()
+		o.workers[k.ID] = w
+		o.mu.Unlock()
 	}
 }
 
 func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
-	portIdx, portStart, portEnd, ok := o.ports.alloc()
-	if !ok {
-		return nil, fmt.Errorf("no port range capacity left on this node")
+	// Raw mode needs a disjoint port range per worker to avoid collisions on
+	// the one real IP/raw socket every raw-mode worker on this node shares
+	// (see TCPTunnel.SetPortRange's doc comment). Proxy mode has no shared
+	// raw socket and no such collision risk at all - each worker's own
+	// egress is a plain net.Dial using the OS's own independent ephemeral
+	// port allocation - so it skips this reservation entirely rather than
+	// pay for a restriction it doesn't need. That matters at scale:
+	// portRangeSize/portRangeMax otherwise cap this node at roughly 252
+	// concurrent keys regardless of mode, a ceiling raw mode genuinely
+	// requires but proxy mode never did. portIdx stays -1 (never a valid
+	// allocator index) to mark "no reservation to release" for
+	// stopWorker/the E2E check below.
+	portIdx := -1
+	var portStart, portEnd uint16
+	if o.cfg.ExitMode == tunnel.ExitModeRaw {
+		var ok bool
+		portIdx, portStart, portEnd, ok = o.ports.alloc()
+		if !ok {
+			return nil, fmt.Errorf("no port range capacity left on this node")
+		}
+	}
+
+	// e2e_encryption is binding, not advisory (see
+	// transport.EncryptedTransport's doc comment on the auto-detect
+	// leniency this replaced) - if it's on for this key but there's no
+	// token to derive a matching key from, refuse to start the worker
+	// rather than silently running it unencrypted, which would defeat the
+	// whole point of the setting.
+	if k.E2EEncryption && k.Token == "" {
+		if portIdx >= 0 {
+			o.ports.release(portIdx)
+		}
+		return nil, fmt.Errorf("key %s has e2e_encryption on but no usable token", k.ID)
+	}
+
+	// Every stream manages its own compression (and, with e2e_encryption on,
+	// its own encryption) internally rather than being wrapped in anything -
+	// see YandexDocsTransport.EnableSelfCompression and
+	// EnableEncryptedSelfCompression's doc comments. For yandex_multistream
+	// this MUST happen per stream, before MultiStreamTransport ever sees the
+	// data: its own Send() reads streamIndex straight off what it assumes is
+	// a raw IP/TCP header (see multistream.go) to keep one real connection
+	// pinned to one stream - handed compressed/encrypted bytes instead, that
+	// read is just noise, which breaks the flow-pinning multistream exists
+	// for. mobile.go's client-side wrapYandex already gets this right per
+	// stream; this mirrors it.
+	wrapStream := func(yd *yandex.YandexDocsTransport, idx int, perStreamKey bool) transport.Transport {
+		if !k.E2EEncryption {
+			yd.EnableSelfCompression()
+			return yd
+		}
+		if perStreamKey {
+			yd.EnableEncryptedSelfCompressionForStream(k.Token, true, idx)
+		} else {
+			yd.EnableEncryptedSelfCompression(k.Token, true)
+		}
+		return yd
 	}
 
 	var trans transport.Transport
@@ -223,38 +311,32 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 	if k.Transport == "yandex_multistream" {
 		streams := make([]transport.Transport, len(k.DocURLs))
 		for i, url := range k.DocURLs {
-			streams[i] = yandex.NewYandexDocsTransport(url, transport.DefaultConfig())
+			streams[i] = wrapStream(yandex.NewYandexDocsTransport(url, transport.DefaultConfig()), i, true)
 		}
 		trans = transport.NewMultiStreamTransport(streams)
 		label = strings.Join(k.DocURLs, ",")
 	} else {
-		trans = yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig())
+		trans = wrapStream(yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig()), 0, false)
 	}
-	if k.Token != "" {
-		trans = transport.NewEncryptedTransport(trans, k.Token, true)
-	}
-	trans = transport.NewCompressedTransport(trans)
 	if err := trans.Start(); err != nil {
-		o.ports.release(portIdx)
+		if portIdx >= 0 {
+			o.ports.release(portIdx)
+		}
 		return nil, err
 	}
 	tun := tunnel.NewTCPTunnelMode(trans, true, o.cfg.ExitMode)
-	// See TCPTunnel.SetPortRange's doc comment: every worker on this node
-	// shares one real IP and one raw socket's view of all inbound TCP
-	// traffic, so without a disjoint range per worker, two keys' stacks
-	// could independently pick the same source port at the same time and
-	// cross-deliver each other's traffic. Moot under ExitModeProxy (no
-	// shared raw socket, no ephemeral-port allocation on this stack at all
-	// - real egress is a plain net.Dial outside gvisor) but harmless to
-	// still set.
-	tun.SetPortRange(portStart, portEnd)
+	if portIdx >= 0 {
+		tun.SetPortRange(portStart, portEnd)
+	}
 	return &worker{trans: trans, tun: tun, docURL: label, portIdx: portIdx}, nil
 }
 
 func (o *Orchestrator) stopWorker(w *worker) {
 	w.trans.Stop()
 	w.tun.Close()
-	o.ports.release(w.portIdx)
+	if w.portIdx >= 0 {
+		o.ports.release(w.portIdx)
+	}
 }
 
 func (o *Orchestrator) usageLoop(ctx context.Context) {
@@ -295,10 +377,25 @@ func (o *Orchestrator) reportUsage(ctx context.Context) {
 		return
 	}
 
-	disabledNow, err := o.client.ReportUsage(ctx, deltas)
-	if err != nil {
-		utils.Debugf("[NODEAGENT] report usage failed: %v", err)
-		return
+	// The control plane rejects a request over 1000 deltas outright (see
+	// handleNodeUsage's own cap) rather than partially applying it - above
+	// that many concurrently active keys on one node, sending them all in
+	// one request silently drops the ENTIRE usage report every tick instead
+	// of just the excess. Chunking keeps usage/quota enforcement correct
+	// past that scale instead of only below it.
+	const usageChunkSize = 1000
+	var disabledNow []string
+	for start := 0; start < len(deltas); start += usageChunkSize {
+		end := start + usageChunkSize
+		if end > len(deltas) {
+			end = len(deltas)
+		}
+		chunkDisabled, err := o.client.ReportUsage(ctx, deltas[start:end])
+		if err != nil {
+			utils.Debugf("[NODEAGENT] report usage failed: %v", err)
+			continue
+		}
+		disabledNow = append(disabledNow, chunkDisabled...)
 	}
 
 	if len(disabledNow) == 0 {

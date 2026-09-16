@@ -66,21 +66,23 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 		return
 	}
 
-	// This tunnel is TCP-only by construction (see the SOCKS5 UDP ASSOCIATE
-	// 0x07 rejection elsewhere) - the stack's own protocol registration
-	// matches (ipv4 + tcp/udp, no icmp; see tunnel.go), and its NAT/
-	// forwarding code (SetForwardingDefaultAndAllNICs, exit-node only)
-	// nil-pointer-panics trying to handle a protocol it has no registered
-	// handler for instead of returning an error. Confirmed in production
-	// logs: proto=1 (ICMP) - a client's own OS routing a ping, or its own
-	// path-MTU probing, into the tunnel's default route, not anything this
-	// tool ever sends itself. Dropping it here, before it can reach
+	// The stack only registers TCP and UDP transport handlers (see
+	// tunnel.go's stack.New call) - anything else (ICMP, etc.) has no
+	// registered handler, and its NAT/forwarding code
+	// (SetForwardingDefaultAndAllNICs, exit-node only) nil-pointer-panics
+	// trying to dispatch such a packet instead of returning an error.
+	// Confirmed in production logs: proto=1 (ICMP) - a client's own OS
+	// routing a ping, or its own path-MTU probing, into the tunnel's default
+	// route, not anything this tool ever sends itself. Dropping anything
+	// that isn't TCP(6) or UDP(17) here, before it can reach
 	// DeliverNetworkPacket, is the same outcome the recover() below already
 	// produces (packet dropped, everything else keeps working) without
 	// paying for a panic - and, on an exit node under real traffic, without
 	// the same bad packet being retransmitted by the sender and re-panicking
-	// on every single retry.
-	if len(data) < 20 || data[9] != 6 {
+	// on every single retry. UDP must stay allowed through: it's how general
+	// UDP relay (not just TCP) works in raw exit mode (see ExitModeRaw's doc
+	// comment) and how the mobile client's gateway relays DNS/UDP traffic.
+	if len(data) < 20 || (data[9] != 6 && data[9] != 17) {
 		return
 	}
 
@@ -107,8 +109,18 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 		}
 	}()
 
+	// buffer.MakeWithData already copies data into gvisor's own pooled chunk
+	// (see NewViewWithData -> View.Write) before this returns, so handing it
+	// data directly - not append([]byte{}, data...) - drops a second,
+	// redundant copy of every inbound packet without changing ownership:
+	// every real caller (gateway.go's per-read allocation, a transport's own
+	// freshly-decoded/decrypted/decompressed bytes) already hands over an
+	// exclusively-owned buffer nothing else will touch afterward. Verified
+	// against every current caller, including the MAX transport's WebRTC
+	// path (pion/webrtc's DataChannel.readLoop copies out of its own pooled
+	// read buffer before the callback ever sees the slice).
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(append([]byte{}, data...)),
+		Payload: buffer.MakeWithData(data),
 	})
 	dispatcher.DeliverNetworkPacket(ipv4.ProtocolNumber, pkt)
 }
@@ -126,10 +138,12 @@ func (e *TunnelLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcp
 	return n, nil
 }
 
-func (e *TunnelLinkEndpoint) MTU() uint32                                 { return 1500 }
-func (e *TunnelLinkEndpoint) MaxHeaderLength() uint16                      { return 0 }
-func (e *TunnelLinkEndpoint) LinkAddress() tcpip.LinkAddress               { return "\x02\x00\x00\x00\x00\x01" }
-func (e *TunnelLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities { return stack.CapabilityNone }
+func (e *TunnelLinkEndpoint) MTU() uint32                    { return 1500 }
+func (e *TunnelLinkEndpoint) MaxHeaderLength() uint16        { return 0 }
+func (e *TunnelLinkEndpoint) LinkAddress() tcpip.LinkAddress { return "\x02\x00\x00\x00\x00\x01" }
+func (e *TunnelLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
+	return stack.CapabilityNone
+}
 func (e *TunnelLinkEndpoint) Attach(dispatcher stack.NetworkDispatcher) {
 	e.dispatcherMu.Lock()
 	e.dispatcher = dispatcher
@@ -140,11 +154,11 @@ func (e *TunnelLinkEndpoint) IsAttached() bool {
 	defer e.dispatcherMu.RUnlock()
 	return e.dispatcher != nil
 }
-func (e *TunnelLinkEndpoint) Wait()                                        {}
-func (e *TunnelLinkEndpoint) ARPHardwareType() header.ARPHardwareType      { return header.ARPHardwareNone }
-func (e *TunnelLinkEndpoint) AddHeader(*stack.PacketBuffer)                {}
-func (e *TunnelLinkEndpoint) Close()                                       {}
-func (e *TunnelLinkEndpoint) SetMTU(uint32)                                {}
-func (e *TunnelLinkEndpoint) SetLinkAddress(tcpip.LinkAddress)             {}
-func (e *TunnelLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool         { return true }
-func (e *TunnelLinkEndpoint) SetOnCloseAction(func())                      {}
+func (e *TunnelLinkEndpoint) Wait()                                   {}
+func (e *TunnelLinkEndpoint) ARPHardwareType() header.ARPHardwareType { return header.ARPHardwareNone }
+func (e *TunnelLinkEndpoint) AddHeader(*stack.PacketBuffer)           {}
+func (e *TunnelLinkEndpoint) Close()                                  {}
+func (e *TunnelLinkEndpoint) SetMTU(uint32)                           {}
+func (e *TunnelLinkEndpoint) SetLinkAddress(tcpip.LinkAddress)        {}
+func (e *TunnelLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool    { return true }
+func (e *TunnelLinkEndpoint) SetOnCloseAction(func())                 {}

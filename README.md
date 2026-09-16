@@ -133,6 +133,39 @@ Then set up a SOCKS5 proxy in your browser at localhost:1080.
 | `--node-token`   | ``      | Managed mode: this node's bearer token from controlplane |
 | `--mode`         | `raw`   | Exit node only: `raw` (needs root, general UDP relay) or `proxy` (no root, TCP only) |
 | `--local-ip`     | ``      | Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with `-s` |
+| `--codec`        | `legacy` | Wire codec for `--transport volga`/`oneme`: `legacy` (per-packet LZ4, unchanged) or `batched` (coalesce bursts into one zstd-compressed message per transport send - see below). Both ends must agree. Ignored for `yandex`/`yandex_multistream` - see below. |
+
+Ported from upstream [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux):
+`batched` coalesces a burst of outgoing tunnel packets (plus a short linger
+window to catch stragglers - both tunable via `OPENFLUX_BATCH_BYTES` /
+`OPENFLUX_BATCH_COUNT` / `OPENFLUX_BATCH_LINGER_MS` env vars) into a single
+zstd-compressed message per transport send, instead of one message per
+packet. Applies to `volga`/`oneme` only; a client and exit node must run the
+same `--codec` for these - they can't decode each other's frames otherwise.
+
+The `yandex`/`yandex_multistream` transports don't use `--codec` at all -
+they already coalesce internally, and auto-negotiate whole-batch zstd
+compression with the peer instead of compressing each packet before
+batching: once a peer's keepalive proves it understands the newer format,
+several raw packets are framed together and zstd-compressed as one unit
+rather than LZ4-compressed one at a time before being batched - strictly
+better compression (it can exploit redundancy between packets in the batch,
+not just within one) at no compatibility cost. An old client or exit node
+that's never seen this feature is unaffected: the bytes it sends and
+receives are untouched, and a new peer talking to it just keeps using the
+older per-packet format it always used, indefinitely if that peer never
+upgrades. Nothing to configure - this is automatic and safe to roll out to
+only one side of a deployment at a time.
+
+This applies with `e2e_encryption` on too, not just plain keys: instead of
+encrypting each compressed packet independently and then batching the
+ciphertexts (what the traditional wrapping does, and what this falls back to
+until negotiated), a whole batch of raw packets is compressed and THEN
+encrypted as one sealed unit once the peer proves (via a second,
+separate capability check) it does encrypted self-compression for this key -
+plaintext compression markers never leave the process either way, and a peer
+still on the traditional wrapping decrypts and decompresses the fallback
+format exactly as before.
 
 ## Multi-user deployments (controlplane)
 
