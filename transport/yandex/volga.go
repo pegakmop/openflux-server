@@ -92,13 +92,9 @@ const (
 	volgaReasonWSReadError  = "ws_read_error"
 )
 
-// volgaUserAgent used to hardcode its own separate fingerprint
-// ("rv:153.0) ... Firefox/153.0" - a Firefox version number well ahead of
-// any real release at the time, itself a plausible bot-detection signal
-// independent of anything else. Now shares browserUserAgent (see
-// browser_ua.go) so this and fetchDocInfo/the WebSocket dial in yandex.go
-// always present the same, currently-real browser identity rather than
-// three different invented ones.
+// volgaUserAgent shares browserUserAgent (see browser_ua.go) rather than a
+// separately hardcoded fingerprint, so every HTTP/WS request across this
+// package presents the same, currently-real browser identity.
 const volgaUserAgent = browserUserAgent
 
 var reClientConfig = regexp.MustCompile(`<script[^>]*id="client-config"[^>]*>(.*?)</script>`)
@@ -676,15 +672,11 @@ func (r *relayClient) sendBatch(batch [][]byte) error {
 	return nil
 }
 
-// markSent/wasRecentlySent dedup a whole sent batch's raw blob (the exact
-// bytes that get base64'd into the relay POST) so wsListener can recognize
-// its own traffic bounced back through push.yandex.ru's broadcast and drop
-// it - the same content-hash approach yandex.go needed for its engine.io
-// echo, and for the same reason: the wire-level "is this mine?" signal
-// (there, session identity; here, inner.UserID) turned out not to reliably
-// distinguish sender from peer on an anonymous, no-login share link, where
-// Yandex can hand out the same guest identity to every viewer. A CRC32 of
-// the actual bytes has no such dependency on identity being distinct.
+// markSent/wasRecentlySent dedup a whole sent batch's raw blob so wsListener
+// can recognize its own traffic bounced back through push.yandex.ru's
+// broadcast and drop it. inner.UserID can't do this: on an anonymous,
+// no-login share link Yandex can hand every viewer the same guest identity,
+// so a CRC32 of the actual bytes is used instead.
 func (r *relayClient) markSent(data []byte) {
 	h := crc32.ChecksumIEEE(data)
 	now := time.Now()
@@ -805,12 +797,9 @@ func (w *wsListener) run() {
 		if strings.HasPrefix(err.Error(), "dial:") {
 			reason = volgaReasonWSDialFailed
 		}
-		// w.emit is BaseTransport.EmitEvent, which is a silent no-op unless
-		// something called SetEventCallback - true for the Android app, but
-		// the exit node (nodeagent.Orchestrator) never does. Without this,
-		// every WS connect/read failure on the exit node - "sends fine,
-		// never receives anything" looks exactly like this from the
-		// client's side - produced zero log output, even with --debug.
+		// w.emit (BaseTransport.EmitEvent) is a silent no-op unless
+		// SetEventCallback was called - never true on the exit node, so this
+		// debug log is the only visibility into a WS connect/read failure there.
 		utils.Debugf("[VOLGA] WS %s (attempt %d): %v", reason, attempt, err)
 		w.emit(transport.EventRetrying, fmt.Sprintf("%d|%d|%s|%s", attempt, int(delay.Seconds()), reason, err.Error()))
 
@@ -864,16 +853,11 @@ func (w *wsListener) connect(attempt int) error {
 	w.emit(transport.EventConnected, strconv.Itoa(attempt))
 	utils.Debugf("[VOLGA] WS connected: user=%s", w.auth.UserIDStr)
 
-	// This connection is receive-only from our side - push.yandex.ru
-	// pushes updates to us, and we never have anything of our own to
-	// write on it after the initial dial. With zero outbound traffic for
-	// the connection's entire life, a NAT/firewall on the path (a mobile
-	// carrier's, most likely) can decide the "idle" connection is dead
-	// and drop it, which then surfaces here as ReadMessage returning
-	// "websocket: close 1005 (no status)" - the TCP connection simply
-	// vanished, not a real close handshake from either side. A periodic
-	// WS-protocol ping keeps real traffic flowing on our side too, so
-	// nothing on the path ever considers this connection idle.
+	// This connection is receive-only from our side (push.yandex.ru pushes
+	// to us, nothing to write back), so with zero outbound traffic a
+	// NAT/firewall can decide it's idle and drop it - surfacing as
+	// ReadMessage returning "websocket: close 1005 (no status)". A periodic
+	// ping keeps traffic flowing so nothing on the path considers it idle.
 	pingDone := make(chan struct{})
 	defer close(pingDone)
 	go func() {
@@ -939,16 +923,11 @@ func (w *wsListener) handleMessage(raw []byte) {
 		return
 	}
 
-	// inner.UserID used to be compared against w.auth.UserID here to drop
-	// self-echo, on the assumption that Yandex always hands each viewer of
-	// the doc a distinct numeric identity. On an anonymous, no-login share
-	// link that assumption doesn't hold - both sides of the tunnel can end
-	// up with the same guest UserID, which made this comparison true for
-	// every message, not just our own, and silently dropped 100% of the
-	// peer's real traffic ("sends fine, never receives anything"). Self-echo
-	// is now caught downstream by content hash instead (see
-	// relayClient.wasRecentlySent), which doesn't depend on identity being
-	// distinct.
+	// inner.UserID is not used to drop self-echo here: on an anonymous,
+	// no-login share link both sides of the tunnel can get the same guest
+	// UserID, which would drop 100% of the peer's real traffic too.
+	// Self-echo is instead caught downstream by content hash (see
+	// relayClient.wasRecentlySent).
 	switch inner.T {
 	case "relay":
 		w.handleRelayMessage(inner.Message)

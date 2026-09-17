@@ -12,7 +12,6 @@ CLANG="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
 
 mkdir -p "$OUTPUT_DIR"
 
-# Verify paths
 if [ ! -d "$SDK_PATH" ]; then
     echo "SDK not found: $SDK_PATH"
     exit 1
@@ -23,7 +22,6 @@ if [ ! -f "$CLANG" ]; then
     exit 1
 fi
 
-# Build environment
 export GOARCH=arm64
 export GOOS=ios
 export CGO_ENABLED=1
@@ -35,15 +33,13 @@ export CGO_LDFLAGS="-isysroot $SDK_PATH -arch arm64 -miphoneos-version-min=13.0"
 
 echo "Building for iOS (arm64)..."
 
-# Build static library
 if go build \
     -buildmode=c-archive \
     -ldflags="-s -w" \
     -trimpath \
     -o "$OUTPUT_DIR/$LIBRARY_NAME.a" \
     . ; then
-    
-    # Create header if not auto-generated
+
     if [ ! -f "$OUTPUT_DIR/$LIBRARY_NAME.h" ]; then
         cat > "$OUTPUT_DIR/$LIBRARY_NAME.h" << 'HEADEREOF'
 #ifndef LIBTUNNEL_H

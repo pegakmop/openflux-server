@@ -134,14 +134,11 @@ func Deploy(target SSHTarget, opts DeployOptions, cb Callback) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", target.Host, target.Port)
-	// ssh.Dial's own net.Dial leaves OS-level TCP keepalive off. The
-	// keepalive@openflux goroutine below only puts traffic on a connection
-	// that's still actually there - it does nothing for one the kernel
-	// thinks is fine but that's gone dead on the wire (a mobile network
-	// swapping towers, a NAT that dropped the mapping without either side's
-	// TCP stack noticing yet). A nonzero net.Dialer.KeepAlive turns on the
-	// OS's own probing, which detects that case and fails the connection
-	// outright instead of leaving it silently hung.
+	// ssh.Dial's own net.Dial leaves OS-level TCP keepalive off, so a
+	// connection gone dead on the wire (NAT mapping dropped, tower switch)
+	// would otherwise hang silently instead of failing. The
+	// keepalive@openflux goroutine below only helps a connection that's
+	// still actually there; this is what detects the other case.
 	tcpConn, err := (&net.Dialer{Timeout: connectTimeout, KeepAlive: tcpKeepAlivePeriod}).Dial("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
@@ -156,19 +153,13 @@ func Deploy(target SSHTarget, opts DeployOptions, cb Callback) error {
 
 	cb.OnHostKeyFingerprint(reportedFingerprint)
 
-	// golang.org/x/crypto/ssh sends no keepalive traffic of its own, unlike
-	// a normal ssh(1)/PuTTY client (which is why running install.sh by hand
-	// over a plain SSH session doesn't hit this). install.sh's remote build
-	// steps (go build ./cmd/controlplane, the exit-node binary) can run for
-	// a minute or more with zero output on the channel - long enough for a
-	// NAT/firewall on the path (a mobile carrier's, most likely, given
-	// where this runs) to decide the idle connection is dead and drop it
-	// silently. That surfaces here as session.Wait() returning
-	// *ssh.ExitMissingError ("remote command exited without exit status or
-	// exit signal") - the channel just vanished mid-command, not that the
-	// remote command actually finished and reported anything. A periodic
-	// global request keeps real traffic flowing over the connection so
-	// nothing on the path ever considers it idle.
+	// golang.org/x/crypto/ssh sends no keepalive traffic of its own. install.sh's
+	// remote build steps can run a minute+ with zero channel output - long
+	// enough for a NAT/firewall to drop the idle connection silently, which
+	// surfaces as session.Wait() returning *ssh.ExitMissingError (channel
+	// vanished mid-command, not the remote command actually finishing). A
+	// periodic global request keeps traffic flowing so nothing on the path
+	// considers it idle.
 	stopKeepalive := make(chan struct{})
 	defer close(stopKeepalive)
 	go func() {
@@ -304,16 +295,10 @@ func buildRemoteCommand(opts DeployOptions) string {
 		"NODE_NAME":     opts.NodeName,
 		"NODE_MAX_KEYS": strconv.Itoa(opts.NodeMaxKeys),
 		"RUN_NODE_HERE": boolToYN(opts.RunNodeHere),
-		// install.sh's WEB_PANEL prompt (the optional SvelteKit+Bun admin
-		// panel) defaults to "y" when left unset - fine for a human at a
-		// keyboard, but this exec has no controlling terminal at all, so
-		// install.sh's own read would fail and silently fall through to
-		// that same default, meaning every app-initiated deploy would
-		// attempt a Bun install and an npm build it never asked for,
-		// slower and with its own new failure surface. Pinned to "n" (the
-		// pre-existing embedded panel, unaffected either way) until this
-		// app has a UI for it - see install.sh's WEB_PANEL for what "y"
-		// would actually set up.
+		// install.sh's WEB_PANEL prompt defaults to "y" when unset, but this
+		// exec has no controlling terminal so its read would fail and fall
+		// through to that default - triggering an unwanted Bun/npm build.
+		// Pinned to "n" (embedded panel) until this app has a UI for it.
 		"WEB_PANEL": "n",
 	}
 

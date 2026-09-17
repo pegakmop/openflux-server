@@ -15,7 +15,7 @@ var (
 	useICEInjection = true
 )
 
-func (h *CallHandler) SetOnConnected(cb func())    { h.onConnected = cb }
+func (h *CallHandler) SetOnConnected(cb func())     { h.onConnected = cb }
 func (h *CallHandler) SetDCInbound(cb func([]byte)) { h.dcInbound = cb }
 
 func (h *CallHandler) Send(data []byte) {
@@ -206,10 +206,6 @@ func (h *CallHandler) createPeerConnection(convParams map[string]interface{}) {
 		return
 	}
 	h.dc = dc
-	//_ := uint16(0)
-	//if dc.ID() != nil {
-	//	dcID = *dc.ID()
-	//}
 	dc.OnOpen(func() { logInfo("[%s] DC opened", h.tag) })
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		h.dcInbound(msg.Data)
@@ -228,7 +224,6 @@ func (h *CallHandler) sendSDP(sdp string, sdpType string) {
 	h.seq++
 	logInfo("[%s] Sent SDP %s (%d bytes)", h.tag, sdpType, len(sdp))
 	fmt.Println(msg)
-	//h.conn.WriteMessage(websocket.TextMessage, []byte(msg))
 }
 
 func (h *CallHandler) injectICE(payload []byte) {
@@ -330,7 +325,6 @@ func (h *CallHandler) handleSDP(sdpType string, sdpStr string) {
 			logError("[%s] ERROR: %v", h.tag, err)
 			return
 		}
-		//h.pc.SetLocalDescription(answer)
 		h.sendSDP(answer.SDP, "answer")
 
 	case "answer":
@@ -391,7 +385,6 @@ func startOutgoingCall(client *MaxClient, calleeID int64) *CallHandler {
 				logError("[%s] ERROR: %v", h.tag, err)
 				return
 			}
-			//h.pc.SetLocalDescription(offer)
 			h.sendSDP(offer.SDP, "offer")
 			return
 		}
@@ -422,7 +415,6 @@ func startOutgoingCall(client *MaxClient, calleeID int64) *CallHandler {
 
 	logInfo("[CALLER] Calling %d", calleeID)
 
-	// Connect with auto-reconnect loop
 	go func() {
 		for {
 			h.mu.Lock()
@@ -462,7 +454,6 @@ func startOutgoingCall(client *MaxClient, calleeID int64) *CallHandler {
 			h.mu.Unlock()
 			go h.readLoop()
 
-			// Wait for disconnect signal
 			<-h.reconnectCh
 			logInfo("[CALLER] Reconnecting in 1s...")
 			time.Sleep(1 * time.Second)

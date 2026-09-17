@@ -210,20 +210,13 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	}
 	o.mu.Unlock()
 
-	// Staggered and outside o.mu: starting many keys' WebSocket-based
-	// transports in the same instant - a cold start, or catching up after a
-	// control-plane hiccup queued up many changes at once - bursts dozens to
-	// hundreds of near-simultaneous outbound HTTPS/WSS connections from this
-	// one exit-node IP at the same covert-channel provider. Every worker
-	// already on this node keeps running fine either way (this only touches
-	// keys not already up), so spreading new ones out over time costs
-	// nothing at steady state and removes a self-inflicted CPU/handshake
-	// spike that also looks exactly like the automated traffic pattern
-	// these providers' own bot detection exists to catch (see
-	// yandex.go's fetchDocInfo CAPTCHA handling). Not holding o.mu during
-	// the wait matters at scale: usageLoop/heartbeatLoop must keep running
-	// against the workers already up while a large batch of new ones is
-	// still trickling in.
+	// Staggered and outside o.mu: starting many keys' WebSocket transports at
+	// once (a cold start, or a queued-up control-plane hiccup) would burst
+	// dozens of near-simultaneous outbound connections from this one
+	// exit-node IP - a pattern that looks like the automated traffic
+	// providers' bot detection exists to catch (see fetchDocInfo's CAPTCHA
+	// handling). o.mu stays released during the wait so usageLoop/
+	// heartbeatLoop keep running against workers already up.
 	for i, k := range toStart {
 		if i > 0 {
 			select {
@@ -247,18 +240,13 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 }
 
 func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
-	// Raw mode needs a disjoint port range per worker to avoid collisions on
-	// the one real IP/raw socket every raw-mode worker on this node shares
-	// (see TCPTunnel.SetPortRange's doc comment). Proxy mode has no shared
-	// raw socket and no such collision risk at all - each worker's own
-	// egress is a plain net.Dial using the OS's own independent ephemeral
-	// port allocation - so it skips this reservation entirely rather than
-	// pay for a restriction it doesn't need. That matters at scale:
-	// portRangeSize/portRangeMax otherwise cap this node at roughly 252
-	// concurrent keys regardless of mode, a ceiling raw mode genuinely
-	// requires but proxy mode never did. portIdx stays -1 (never a valid
-	// allocator index) to mark "no reservation to release" for
-	// stopWorker/the E2E check below.
+	// Raw mode needs a disjoint port range per worker (see
+	// TCPTunnel.SetPortRange) since all raw-mode workers share one real
+	// IP/raw socket. Proxy mode's egress is a plain net.Dial with its own
+	// OS ephemeral port allocation, so it skips this reservation entirely -
+	// otherwise portRangeSize/portRangeMax would cap even proxy mode at
+	// ~252 concurrent keys for no reason. portIdx stays -1 to mark "no
+	// reservation to release".
 	portIdx := -1
 	var portStart, portEnd uint16
 	if o.cfg.ExitMode == tunnel.ExitModeRaw {
@@ -282,17 +270,12 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		return nil, fmt.Errorf("key %s has e2e_encryption on but no usable token", k.ID)
 	}
 
-	// Every stream manages its own compression (and, with e2e_encryption on,
-	// its own encryption) internally rather than being wrapped in anything -
-	// see YandexDocsTransport.EnableSelfCompression and
-	// EnableEncryptedSelfCompression's doc comments. For yandex_multistream
-	// this MUST happen per stream, before MultiStreamTransport ever sees the
-	// data: its own Send() reads streamIndex straight off what it assumes is
-	// a raw IP/TCP header (see multistream.go) to keep one real connection
-	// pinned to one stream - handed compressed/encrypted bytes instead, that
-	// read is just noise, which breaks the flow-pinning multistream exists
-	// for. mobile.go's client-side wrapYandex already gets this right per
-	// stream; this mirrors it.
+	// For yandex_multistream, each stream must compress/encrypt itself
+	// before MultiStreamTransport ever sees the data: its Send() reads
+	// streamIndex off what it assumes is a raw IP/TCP header (see
+	// multistream.go) to pin one real connection to one stream - handed
+	// compressed/encrypted bytes instead, that read is just noise. Mirrors
+	// mobile.go's client-side wrapYandex.
 	wrapStream := func(yd *yandex.YandexDocsTransport, idx int, perStreamKey bool) transport.Transport {
 		if !k.E2EEncryption {
 			yd.EnableSelfCompression()

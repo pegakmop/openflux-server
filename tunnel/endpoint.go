@@ -68,57 +68,37 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 
 	// The stack only registers TCP and UDP transport handlers (see
 	// tunnel.go's stack.New call) - anything else (ICMP, etc.) has no
-	// registered handler, and its NAT/forwarding code
-	// (SetForwardingDefaultAndAllNICs, exit-node only) nil-pointer-panics
-	// trying to dispatch such a packet instead of returning an error.
-	// Confirmed in production logs: proto=1 (ICMP) - a client's own OS
-	// routing a ping, or its own path-MTU probing, into the tunnel's default
-	// route, not anything this tool ever sends itself. Dropping anything
-	// that isn't TCP(6) or UDP(17) here, before it can reach
-	// DeliverNetworkPacket, is the same outcome the recover() below already
-	// produces (packet dropped, everything else keeps working) without
-	// paying for a panic - and, on an exit node under real traffic, without
-	// the same bad packet being retransmitted by the sender and re-panicking
-	// on every single retry. UDP must stay allowed through: it's how general
-	// UDP relay (not just TCP) works in raw exit mode (see ExitModeRaw's doc
-	// comment) and how the mobile client's gateway relays DNS/UDP traffic.
+	// registered handler, and the exit node's NAT/forwarding code
+	// (SetForwardingDefaultAndAllNICs) nil-pointer-panics trying to dispatch
+	// it instead of returning an error. Confirmed in production: proto=1
+	// (ICMP) from a client's own OS routing a ping into the tunnel's
+	// default route. Dropping non-TCP/UDP here avoids paying for that panic
+	// on every single retransmit of a bad packet. UDP must stay allowed:
+	// it's how general UDP relay works in raw exit mode and how the mobile
+	// client's gateway relays DNS/UDP traffic.
 	if len(data) < 20 || (data[9] != 6 && data[9] != 17) {
 		return
 	}
 
-	// gvisor panics on some inputs it doesn't expect instead of returning an
-	// error - seen in production as "panic: unexpected transport protocol =
-	// 0" from its NAT/conntrack code (SetForwardingDefaultAndAllNICs, used
-	// by the exit node) on a packet it apparently didn't like. This call
-	// runs on a shared per-transport goroutine (the covert channel's own
-	// read loop), so an unrecovered panic here doesn't just drop this one
-	// packet - it takes the whole process down, disconnecting every client
-	// this exit node was serving. One bad packet dropped beats that. Kept
-	// as a backstop even after the protocol check above: that check only
-	// covers the one specific cause already confirmed in production, not
-	// every input gvisor might ever choke on.
+	// gvisor panics on some inputs instead of returning an error - seen in
+	// production as "panic: unexpected transport protocol = 0" from its
+	// NAT/conntrack code. This runs on a shared per-transport goroutine, so
+	// an unrecovered panic here takes the whole process down, disconnecting
+	// every client this exit node serves. Kept as a backstop even after the
+	// protocol check above, which only covers the one cause confirmed so far.
 	defer func() {
 		if r := recover(); r != nil {
-			// Always logged (not gated behind utils.IsVerbose() like the
-			// line above) - this is already the rare, exceptional case
-			// worth paying attention to, and the whole point is capturing
-			// what kind of packet triggers it without needing --debug
-			// already running when it happens again.
+			// Always logged, not gated behind utils.IsVerbose(): this is
+			// already the rare case worth capturing without --debug running.
 			log.Printf("[TUNNEL] recovered from a panic dispatching an inbound packet (%d bytes, %s): %v",
 				len(data), network.ParsePacketInfo(data), r)
 		}
 	}()
 
-	// buffer.MakeWithData already copies data into gvisor's own pooled chunk
-	// (see NewViewWithData -> View.Write) before this returns, so handing it
-	// data directly - not append([]byte{}, data...) - drops a second,
-	// redundant copy of every inbound packet without changing ownership:
-	// every real caller (gateway.go's per-read allocation, a transport's own
-	// freshly-decoded/decrypted/decompressed bytes) already hands over an
-	// exclusively-owned buffer nothing else will touch afterward. Verified
-	// against every current caller, including the MAX transport's WebRTC
-	// path (pion/webrtc's DataChannel.readLoop copies out of its own pooled
-	// read buffer before the callback ever sees the slice).
+	// buffer.MakeWithData already copies data into gvisor's own pooled chunk,
+	// so handing it data directly (not append([]byte{}, data...)) avoids a
+	// redundant copy: every real caller hands over an exclusively-owned
+	// buffer nothing else touches afterward.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})

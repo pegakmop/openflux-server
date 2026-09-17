@@ -821,7 +821,6 @@ func (t *CupsonlineTransport) Stats() transport.TransportStats {
 	}
 }
 
-// statsLoop — печатает per-channel статистику каждые StatsInterval секунд.
 func (t *CupsonlineTransport) statsLoop() {
 	tick := time.NewTicker(t.config.StatsInterval)
 	defer tick.Stop()

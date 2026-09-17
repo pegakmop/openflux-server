@@ -57,32 +57,22 @@ var defaultBootstrapDNSServers = []string{"77.88.8.8:53", "8.8.8.8:53"}
 var bootstrapDNSServers = append([]string(nil), defaultBootstrapDNSServers...)
 
 // BootstrapDNSServers returns a copy of the resolver list currently in
-// effect. Exported so the gateway can reuse the exact same
-// reachable-directly resolvers when it serves DNS for sites that bypass the
-// tunnel (see gateway.dns.go) - whatever SetBootstrapDNSServers last set
-// applies there too, for the same reason: if the caller had to force a
-// specific resolver to get anywhere on this network, a site bypassing the
-// tunnel needs that same override just as much as the transport's own
-// bootstrap lookups do.
+// effect. Exported so the gateway can reuse the same reachable-directly
+// resolvers for DNS on sites that bypass the tunnel (see gateway.dns.go) -
+// whatever SetBootstrapDNSServers last set applies there too.
 func BootstrapDNSServers() []string {
 	return append([]string(nil), bootstrapDNSServers...)
 }
 
 // SetBootstrapDNSServers forcibly replaces the resolver(s) ProtectedResolver
-// queries to resolve the transport's own hostnames (docs.yandex.ru and
-// friends) before the tunnel exists to carry anything else - normally two
-// fixed public resolvers (see defaultBootstrapDNSServers), which is fine
-// until the network a device is actually on can't reach them at all (a
-// carrier that blackholes third-party resolvers, a captive network that
-// only routes to its own DNS) while a different, locally-reachable server
-// works fine. A non-empty list here REPLACES the defaults outright rather
-// than being tried alongside them - the caller already knows the defaults
-// don't work for them, and falling back to a server already established as
-// unreachable would just re-add the delay this exists to avoid. An empty
-// list restores the defaults. Not concurrency-safe against a lookup already
-// in flight, same as SetProtector - call this before starting a tunnel
-// (and once more, empty, after stopping it) rather than while one is
-// running.
+// queries for the transport's own hostnames before the tunnel exists to
+// carry anything else - for a network whose own path to the two default
+// public resolvers is blocked (a carrier blackhole, a captive network) but
+// that can reach a different server fine. A non-empty list REPLACES the
+// defaults rather than being tried alongside them, since falling back to a
+// server already known unreachable just re-adds the delay this avoids. An
+// empty list restores the defaults. Not concurrency-safe against a lookup
+// already in flight - call this before starting a tunnel, not while one runs.
 func SetBootstrapDNSServers(servers []string) {
 	if len(servers) == 0 {
 		bootstrapDNSServers = append([]string(nil), defaultBootstrapDNSServers...)
@@ -105,17 +95,11 @@ func SetBootstrapDNSServers(servers []string) {
 // everywhere else.
 //
 // The address Go's resolver asks Dial to connect to is not usable as-is on
-// Android: Android has no /etc/resolv.conf, so Go's own dnsReadConfig can't
-// read one and falls back to its hardcoded defaultNS - 127.0.0.1:53 and
-// [::1]:53 (see src/net/dnsconfig_unix.go and dnsconfig.go). Nothing
-// listens there, so every lookup failed with "connection refused" before
-// ever reaching Yandex - not a timeout, not a capture-by-the-tunnel
-// problem, just Go asking the wrong address (this is also why Go's own net
-// package normally refuses to prefer the Go resolver on Android at all -
-// see goosPrefersCgo in src/net/conf.go, golang/go#10714 - forcing PreferGo
-// above is what makes this Dial hook run in the first place, so it has to
-// make up for that). Dial below ignores whatever address it was asked for
-// and queries a real public resolver directly instead.
+// Android: with no /etc/resolv.conf to read, Go falls back to its hardcoded
+// defaultNS (127.0.0.1:53), where nothing listens - every lookup fails with
+// "connection refused" before ever reaching Yandex. Dial below ignores
+// whatever address it was asked for and queries a real public resolver
+// directly instead.
 func ProtectedResolver() *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,

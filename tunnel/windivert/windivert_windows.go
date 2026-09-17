@@ -46,7 +46,7 @@ func New() (*Endpoint, error) {
 		return nil, fmt.Errorf("windivert open: %w", err)
 	}
 
-	// Очередь побольше. Если не сработает — не критично.
+	// A larger queue; not critical if the platform ignores this.
 	_ = h.SetParam(windivert.QueueLength, 8192)
 	ep := &Endpoint{
 		handle: h,
@@ -108,7 +108,8 @@ func (e *Endpoint) readLoop() {
 		flags := tcpHdr[13]
 
 		if addr.Outbound() {
-			// RST от Windows-стека для порта gVisor → дроп
+			// A RST from the Windows stack for a port gVisor owns must be
+			// dropped, not passed through - it isn't gVisor's own connection to reset.
 			if flags&0x04 != 0 {
 				if _, ok := e.gvisorPorts.Load(srcPort); ok {
 					e.rstDropped.Add(1)
@@ -120,18 +121,19 @@ func (e *Endpoint) readLoop() {
 			continue
 		}
 
-		// Входящий из сети
+		// Inbound from the network, not addressed to a gVisor-owned port.
 		if _, ok := e.gvisorPorts.Load(dstPort); !ok {
 			e.packetSkip.Add(1)
 			_, _ = e.handle.Send(pkt, &addr)
 			continue
 		}
 
-		// НАШ пакет. Отдаём копию в gVisor, но НЕ пропускаем в Windows-стек.
+		// Ours: hand a copy to gVisor but do not pass it through to the
+		// Windows stack (it's dropped from windivert's point of view).
 		pktCopy := make([]byte, len(pkt))
 		copy(pktCopy, pkt)
 
-		// DNAT: dst IP → 10.10.10.2
+		// DNAT: dst IP -> 10.10.10.2
 		copy(pktCopy[16:20], []byte{10, 10, 10, 2})
 		recalcIPChecksum(pktCopy)
 		recalcTCPChecksum(pktCopy)
@@ -144,7 +146,6 @@ func (e *Endpoint) readLoop() {
 		if cb != nil {
 			cb(pktCopy)
 		}
-		// НЕ вызываем Send — пакет дропается
 	}
 }
 

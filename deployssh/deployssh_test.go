@@ -404,18 +404,10 @@ func TestDeployNonZeroExitIsAnError(t *testing.T) {
 
 // --- keepalive --------------------------------------------------------
 
-// TestDeploySendsKeepaliveDuringQuietRemoteCommand guards the actual
-// production bug this exists for: golang.org/x/crypto/ssh sends no
-// keepalive traffic of its own, unlike a normal ssh(1) client - a remote
-// command that produces no output for a while (install.sh's `go build`
-// steps routinely do) can sit on an otherwise-idle connection long enough
-// for a NAT/firewall on the path to drop it, which session.Wait() then
-// reports as *ssh.ExitMissingError, not as a network error -
-// "remote command exited without exit status or exit signal" from a
-// channel that simply vanished mid-command, not one that actually ran the
-// command and reported something. Shrinks keepaliveInterval and asserts at
-// least one keepalive global request reaches the server while the remote
-// command is still running and producing no output at all.
+// golang.org/x/crypto/ssh sends no keepalive traffic of its own, so a remote
+// command producing no output for a while can sit on an idle connection long
+// enough for a NAT/firewall to drop it. Shrinks keepaliveInterval and asserts
+// at least one keepalive reaches the server during a silent remote command.
 func TestDeploySendsKeepaliveDuringQuietRemoteCommand(t *testing.T) {
 	old := keepaliveInterval
 	keepaliveInterval = 20 * time.Millisecond

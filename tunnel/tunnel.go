@@ -118,18 +118,12 @@ func NewTCPTunnelMode(trans transport.Transport, isExitNode bool, mode ExitMode)
 		utils.Debugf("[TUNNEL] Failed to set send buffer: %v", err)
 	}
 	// gvisor's default MinRTO (200ms, tuned for a real NIC) is far shorter
-	// than a real round trip through this NIC's actual backing channel: a
-	// segment written here goes out over trans.Send, across the covert
-	// channel's own HTTP/WebSocket relay (base64/JSON encoding, a real
-	// network hop each way, and on Volga a batching window on top), and the
-	// ack for it comes back the same way - regularly well over 200ms even
-	// when nothing is actually lost. Below this floor, gvisor's TCP treats
-	// ordinary channel latency as packet loss and retransmits data that's
-	// still legitimately in flight - genuinely re-sent over the real
-	// channel, so it counts as real traffic, just entirely wasted. True
-	// loss at this layer is rare (the channel underneath is TCP-backed
-	// itself), so trading a slower reaction to real loss for eliminating
-	// false-positive retransmits is a clear net win here.
+	// than a round trip through this covert channel (HTTP/WebSocket relay,
+	// base64/JSON, on Volga a batching window too) - regularly well over
+	// 200ms with nothing actually lost. Below this floor gvisor's TCP treats
+	// ordinary channel latency as loss and retransmits data still in
+	// flight, wasting real bandwidth. True loss here is rare (the channel
+	// is TCP-backed itself), so a slower reaction to it is a clear win.
 	minRTO := tcpip.TCPMinRTOOption(1500 * time.Millisecond)
 	if err := t.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber, &minRTO); err != nil {
 		utils.Debugf("[TUNNEL] Failed to set min RTO: %v", err)

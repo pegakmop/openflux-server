@@ -22,13 +22,10 @@ func TestBuildTransportManualYandex(t *testing.T) {
 	}
 }
 
-// A "yandex" profile WITH E2E encryption also gets self-compression (its
-// encrypted flavor - see wrapYandex/YandexDocsTransport.EnableEncryptedSelfCompression),
-// still with no external transport.EncryptedTransport/CompressedTransport
-// wrapping - the returned type is the same bare *yandex.YandexDocsTransport
-// either way. transport/yandex's own tests cover the actual encryption
-// behavior in depth; this only guards that buildTransport wires E2E config
-// through instead of silently ignoring it.
+// A "yandex" profile with E2E encryption gets encrypted self-compression
+// (see wrapYandex), still with no external wrapping - same bare
+// *yandex.YandexDocsTransport type. This only guards that buildTransport
+// wires E2E config through rather than silently ignoring it.
 func TestBuildTransportManualYandexWithE2EEncryption(t *testing.T) {
 	cfg := Config{
 		Mode:          "manual",
@@ -126,13 +123,8 @@ func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
 }
 
 func TestBuildTransportMultiStream(t *testing.T) {
-	// KeyToken set but E2EEncryption left false (default): must still build
-	// successfully without encrypting - see E2EEncryption's doc comment on
-	// why a bare KeyToken alone must never turn encryption on. Each stream
-	// gets self-compression instead (no E2E, per wrapYandex), so the
-	// per-stream transports stay bare *yandex.YandexDocsTransport values,
-	// same as the single-stream case - only the outer MultiStreamTransport
-	// wrapper is visible here.
+	// KeyToken set but E2EEncryption left false: must still build successfully
+	// without encrypting - a bare KeyToken alone must never turn encryption on.
 	cfg := Config{
 		Mode:      "manual",
 		Transport: "yandex_multistream",

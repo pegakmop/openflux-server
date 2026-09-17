@@ -19,20 +19,11 @@ import (
 
 // --- Send ---------------------------------------------------------------
 
-// TestSendQueuesEvenWhileDisconnected guards a real bug: Send used to
-// reject with "transport not connected" for the entire window between a
-// drop and the next successful reconnect, even though the session's
-// WriteQueue survives a reconnect specifically so queued data doesn't have
-// to be lost (see connectToDoc's existingSession handling and Send's own
-// doc comment). A disconnected transport with no session at all must still
-// fail - only "has a session, but IsConnected() is momentarily false"
-// should succeed.
+// A session with an existing WriteQueue (mid-reconnect) must still accept
+// Send even while IsConnected() is false; only "no session at all" should fail.
 func TestSendQueuesEvenWhileDisconnected(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.session = &DocSession{WriteQueue: make(chan []byte, 4)}
-	// Deliberately not calling tr.SetConnected(true) - this is the state
-	// during a reconnect: a (possibly stale) session exists, but the
-	// transport doesn't consider itself connected right now.
 
 	if err := tr.Send([]byte("hello")); err != nil {
 		t.Fatalf("Send while disconnected but with a session = %v, want nil", err)
@@ -57,15 +48,6 @@ func TestSendFailsWithNoSessionAtAll(t *testing.T) {
 
 // --- self-echo filtering -------------------------------------------------
 
-// TestHandleMessageDropsOwnEcho guards the real production bug behind
-// "unexpected transport protocol = 0": Yandex's doc broadcasts every
-// "cursor" event to every participant, sender included, so a packet this
-// transport itself just sent (via writerLoop, which calls markSent) comes
-// straight back over the same socket. Before wasRecentlySent existed,
-// handleMessage handed that to CallReceive indistinguishably from real
-// peer data, reinjecting our own outgoing traffic into our own tunnel
-// endpoint - a well-formed packet flowing in a direction the gvisor
-// NAT/forwarding on that NIC never expects.
 func TestHandleMessageDropsOwnEcho(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -84,9 +66,7 @@ func TestHandleMessageDropsOwnEcho(t *testing.T) {
 	}
 }
 
-// TestHandleMessageDeliversRealPeerData is TestHandleMessageDropsOwnEcho's
-// counterpart: data this transport never sent must still reach CallReceive
-// - the echo filter must not swallow everything indiscriminately.
+// The echo filter must not swallow data this transport never sent.
 func TestHandleMessageDeliversRealPeerData(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -121,10 +101,6 @@ func buildBatch(t *testing.T, packets ...[]byte) []byte {
 	return blob.Bytes()
 }
 
-// TestHandleMessageUnbatchesMultiPacketPayload guards the new wire format
-// writerLoop/sendBatch produce: several packets length-prefixed together
-// behind a leading batchMarker byte, so one WS message can carry many
-// packets instead of exactly one.
 func TestHandleMessageUnbatchesMultiPacketPayload(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -141,18 +117,15 @@ func TestHandleMessageUnbatchesMultiPacketPayload(t *testing.T) {
 	}
 }
 
-// TestHandleMessageStillHandlesUnbatchedLegacyPayload guards backward
-// compatibility with a peer that hasn't picked up batching yet (or a
-// still-running exit node mid-redeploy): a payload with no batchMarker
-// byte - exactly what compress() always produced before batching existed -
-// must still be delivered as a single packet, unsplit.
+// A payload with no batchMarker byte (legacy peer) must still be delivered
+// as a single unsplit packet.
 func TestHandleMessageStillHandlesUnbatchedLegacyPayload(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
 	var received [][]byte
 	tr.Receive(func(data []byte) { received = append(received, data) })
 
-	legacy := []byte{0x00, 'h', 'i'} // compress()'s own "stored" marker, not batchMarker
+	legacy := []byte{0x00, 'h', 'i'} // "stored" marker, not batchMarker
 	msg := `42["message",{"type":"cursor","cursor":"18;` + b64(legacy) + `"}]`
 	tr.handleMessage(nil, []byte(msg))
 
@@ -161,10 +134,7 @@ func TestHandleMessageStillHandlesUnbatchedLegacyPayload(t *testing.T) {
 	}
 }
 
-// TestHandleMessageDropsOwnEchoedBatch is TestHandleMessageDropsOwnEcho's
-// batching-era counterpart: self-echo dedup has to hash the whole framed
-// batch sendBatch actually put on the wire, not the individual packets
-// inside it.
+// Self-echo dedup must hash the whole framed batch, not individual packets.
 func TestHandleMessageDropsOwnEchoedBatch(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -182,9 +152,6 @@ func TestHandleMessageDropsOwnEchoedBatch(t *testing.T) {
 	}
 }
 
-// TestWriterLoopBatchesMultiplePacketsIntoOneMessage guards the actual
-// throughput win batching exists for: several packets queued in quick
-// succession must go out as one WS message, not one per packet.
 func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -204,8 +171,6 @@ func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	tr.SetConnected(true)
-	// Batching only ever turns on once the peer's own keepalive has proven
-	// it understands batchMarker - see peerBatches.
 	tr.peerBatches.Store(true)
 	queue := make(chan []byte, 10)
 	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
@@ -244,10 +209,8 @@ func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 	}
 }
 
-// TestWriterLoopDoesNotBatchByDefault guards the actual compatibility fix:
-// without proof the peer understands batchMarker, packets must go out one
-// per message in the pre-batching format, or a not-yet-updated peer (in
-// either role) can't parse them at all.
+// Without proof the peer understands batchMarker, packets must go out one
+// per message.
 func TestWriterLoopDoesNotBatchByDefault(t *testing.T) {
 	received := make(chan []byte, 10)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -299,10 +262,6 @@ func TestWriterLoopDoesNotBatchByDefault(t *testing.T) {
 	}
 }
 
-// TestHandleMessageLearnsPeerBatchingFromKeepalive is the other half of the
-// fix: a keepalive carrying kaBatchCapabilityToken must set peerBatches,
-// while a legacy "---KA---" with nothing extra (what a not-yet-updated peer
-// actually sends) must not.
 func TestHandleMessageLearnsPeerBatchingFromKeepalive(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -317,12 +276,8 @@ func TestHandleMessageLearnsPeerBatchingFromKeepalive(t *testing.T) {
 	}
 }
 
-// TestHandleMessageLearnsZstdBatchCapabilityFromKeepalive mirrors
-// TestHandleMessageLearnsPeerBatchingFromKeepalive for
-// kaZstdBatchCapabilityToken: a keepalive carrying only the older
-// kaBatchCapabilityToken (what a peer that supports legacy batching but not
-// self-compression's zstd batch sends) must NOT set peerZstdBatches, and one
-// carrying neither token must set neither flag.
+// A keepalive carrying only the older kaBatchCapabilityToken must not set
+// peerZstdBatches.
 func TestHandleMessageLearnsZstdBatchCapabilityFromKeepalive(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -349,19 +304,10 @@ func TestHandleMessageLearnsZstdBatchCapabilityFromKeepalive(t *testing.T) {
 
 // --- EnableSelfCompression -------------------------------------------------
 //
-// These guard the one thing that actually matters for compatibility: with
-// self-compression enabled but the peer's capability not yet proven (the
-// bootstrap window right after connecting, or a peer that never upgrades at
-// all), the bytes actually placed on the wire must be BYTE-FOR-BYTE
-// identical to what the old external transport.CompressedTransport wrapper
-// would have produced - so an unmodified peer on either end of the
-// connection can't tell the difference.
+// With self-compression enabled but the peer's capability not yet proven,
+// wire bytes must be byte-for-byte identical to the old external
+// transport.CompressedTransport wrapper's output.
 
-// TestSelfCompressReproducesLegacySingleFormatExactly is the core
-// compatibility guarantee for the "peer capability not yet known" case: a
-// self-compressing transport's own per-packet fallback must byte-for-byte
-// match transport.CompressedTransport wrapping the old (non-self-compressing)
-// transport would have produced.
 func TestSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	received := make(chan []byte, 10)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -384,9 +330,7 @@ func TestSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	tr.SetConnected(true)
-	// Neither peerBatches nor peerZstdBatches set - the bootstrap window
-	// before any keepalive has been exchanged, or a peer that never
-	// upgrades past the original format.
+	// Neither peerBatches nor peerZstdBatches set.
 	queue := make(chan []byte, 10)
 	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
 	go tr.writerLoop(queue)
@@ -410,10 +354,7 @@ func TestSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	}
 }
 
-// TestSelfCompressReproducesLegacyBatchFormatExactly is
-// TestSelfCompressReproducesLegacySingleFormatExactly's counterpart once the
-// OLDER kaBatchCapabilityToken (but not the new zstd one) has been learned:
-// must match transport.CompressedTransport(YandexDocsTransport)'s combined
+// With only the older kaBatchCapabilityToken learned, must match
 // per-packet-compress-then-legacy-batch behavior exactly.
 func TestSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	received := make(chan []byte, 1)
@@ -470,9 +411,6 @@ func TestSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	}
 }
 
-// TestSelfCompressUsesZstdBatchOnceBothTokensConfirmed guards the actual new
-// behavior: only once peerZstdBatches is true does writerLoop switch to
-// zstdBatchMarker + transport.EncodeBatch on genuinely raw packets.
 func TestSelfCompressUsesZstdBatchOnceBothTokensConfirmed(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -531,11 +469,8 @@ func TestSelfCompressUsesZstdBatchOnceBothTokensConfirmed(t *testing.T) {
 	}
 }
 
-// TestHandleMessageSelfCompressDecodesZstdBatch is the receive-side
-// counterpart: a self-compressing transport must hand raw packets straight
-// to CallReceive from a zstd-batch frame, with no further decompression
-// step (there's nothing left to decompress - EncodeBatch's payload is raw
-// packets).
+// A self-compressing transport must hand raw packets straight to
+// CallReceive from a zstd-batch frame (EncodeBatch's payload is already raw).
 func TestHandleMessageSelfCompressDecodesZstdBatch(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableSelfCompression()
@@ -554,13 +489,9 @@ func TestHandleMessageSelfCompressDecodesZstdBatch(t *testing.T) {
 	}
 }
 
-// TestHandleMessageSelfCompressDecodesLegacySingleAndBatch guards the other
-// receive-side compatibility direction: a self-compressing transport talking
-// to an old (or not-yet-negotiated) peer must still decompress the
-// transport.Compress'd bytes itself before calling CallReceive, since there
-// is no external transport.CompressedTransport left to do it - unlike a
-// non-self-compressing transport, which must NOT do this (its external
-// wrapper still owns that step - see TestHandleMessageStillHandlesUnbatchedLegacyPayload).
+// A self-compressing transport talking to an old peer must decompress
+// transport.Compress'd bytes itself, since there's no external
+// CompressedTransport left to do it.
 func TestHandleMessageSelfCompressDecodesLegacySingleAndBatch(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableSelfCompression()
@@ -588,12 +519,6 @@ func TestHandleMessageSelfCompressDecodesLegacySingleAndBatch(t *testing.T) {
 	}
 }
 
-// TestNewYandexDocsTransportDefaultsToNotSelfCompressing guards the safest
-// possible default: a transport nobody explicitly opts in (every existing
-// caller, plus any caller added later that forgets to) behaves exactly as
-// it did before this feature existed - handleMessage never attempts to
-// decompress anything itself, leaving that to an external
-// transport.CompressedTransport exactly as today.
 func TestNewYandexDocsTransportDefaultsToNotSelfCompressing(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	if tr.selfCompress {
@@ -603,19 +528,10 @@ func TestNewYandexDocsTransportDefaultsToNotSelfCompressing(t *testing.T) {
 
 // --- EnableEncryptedSelfCompression ------------------------------------
 //
-// Same compatibility discipline as the plain self-compression tests above,
-// plus the extra wrinkle EnableEncryptedSelfCompression's doc comment
-// describes: the legacy fallback format's batchMarker is NOT itself
-// encrypted (only each item inside it is), while the new format and the old
-// single-item fallback are both fully opaque ciphertext with no visible
-// structure until decrypted.
+// The legacy fallback's batchMarker is NOT itself encrypted (only each item
+// inside it is), while the new format and old single-item fallback are
+// fully opaque ciphertext until decrypted.
 
-// TestHandleMessageLearnsEncSelfCompressCapabilityFromKeepalive guards two
-// things: the token is learned like the others, AND - unlike
-// kaBatchCapabilityToken/kaZstdBatchCapabilityToken, which every instance
-// sends unconditionally - a transport that never called
-// EnableEncryptedSelfCompression must never send kaEncSelfCompressToken at
-// all, even though it still sends the other two.
 func TestHandleMessageLearnsEncSelfCompressCapabilityFromKeepalive(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.handleMessage(nil, []byte(`42["message",{"type":"cursor","cursor":"18;---KA---`+kaBatchCapabilityToken+kaZstdBatchCapabilityToken+kaEncSelfCompressToken+`"}]`))
@@ -630,11 +546,8 @@ func TestHandleMessageLearnsEncSelfCompressCapabilityFromKeepalive(t *testing.T)
 	}
 }
 
-// TestKeepAliveOnlySendsEncTokenWhenEncrypted guards the asymmetry directly:
-// a plain (non-encrypted) self-compressing transport's own keepalive must
-// NOT contain kaEncSelfCompressToken - a peer seeing it would wrongly
-// conclude this side does encrypted self-compression and start expecting
-// ciphertext it will never receive.
+// A plain self-compressing transport's keepalive must not contain
+// kaEncSelfCompressToken, or a peer would wrongly expect ciphertext.
 func TestKeepAliveOnlySendsEncTokenWhenEncrypted(t *testing.T) {
 	plain := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	plain.EnableSelfCompression()
@@ -649,12 +562,8 @@ func TestKeepAliveOnlySendsEncTokenWhenEncrypted(t *testing.T) {
 	}
 }
 
-// TestEncryptedSelfCompressReproducesLegacySingleFormatExactly is
-// TestSelfCompressReproducesLegacySingleFormatExactly's encrypted
-// counterpart: before the peer's capability is known, the wire bytes must
-// match transport.Seal(transport.Compress(raw)) exactly - what
-// transport.CompressedTransport(transport.EncryptedTransport(...)) would
-// have produced for the same packet with the same token/role.
+// Before the peer's capability is known, wire bytes must match
+// transport.Seal(transport.Compress(raw)) exactly.
 func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	received := make(chan []byte, 10)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -694,10 +603,8 @@ func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) 
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		// send here is c2s (tr is client role, isExitNode=false) - exactly
-		// the key an exit-node peer (isExitNode=true) would derive as ITS
-		// OWN recv key, so decrypting with it here stands in for "can an
-		// unmodified peer decrypt this".
+		// send is c2s (client role); decrypting with it stands in for "can
+		// an unmodified exit-node peer decrypt this".
 		plain, err := transport.Open(send, decoded)
 		if err != nil {
 			t.Fatalf("an unmodified peer (deriving the same key) must be able to decrypt this: %v", err)
@@ -711,13 +618,10 @@ func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) 
 	}
 }
 
-// TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly is
-// TestSelfCompressReproducesLegacyBatchFormatExactly's encrypted
-// counterpart: with the older kaBatchCapabilityToken confirmed but not
-// kaEncSelfCompressToken, packets go out as a batchMarker-wrapped batch of
-// INDEPENDENTLY encrypted+compressed items - the batchMarker itself stays
-// unencrypted (an unmodified peer's own handleMessage must still see it to
-// un-batch before decrypting each item).
+// With kaBatchCapabilityToken confirmed but not kaEncSelfCompressToken,
+// packets go out as a batchMarker-wrapped batch of independently
+// encrypted+compressed items - batchMarker itself stays unencrypted so an
+// unmodified peer can still un-batch before decrypting each item.
 func TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -739,7 +643,7 @@ func TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	tr.SetConnected(true)
-	tr.peerBatches.Store(true) // legacy batching confirmed, encrypted-self-compress not
+	tr.peerBatches.Store(true) // legacy batching confirmed, enc-self-compress not
 	queue := make(chan []byte, 10)
 	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
 	go tr.writerLoop(queue)
@@ -780,11 +684,8 @@ func TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	}
 }
 
-// TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed guards the
-// actual new behavior: only once BOTH the peer's keepalive proves it does
-// encrypted self-compression does writerLoop switch to encrypting a whole
-// zstd-compressed batch of raw packets as one unit, with no
-// separately-visible structure at all (not even a plaintext batchMarker).
+// Once the peer confirms encrypted self-compression, the whole batch is
+// encrypted as one unit with no visible structure (not even batchMarker).
 func TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -854,20 +755,16 @@ func TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed(t *testing.T) 
 	}
 }
 
-// TestHandleEncryptedMessageDecodesLegacySingleAndBatch is the receive-side
-// counterpart, covering BOTH shapes an unmodified (or not-yet-negotiated)
-// peer's messages can take: a single item, and a batchMarker-wrapped batch
-// of individually encrypted items.
+// Covers both shapes an unmodified peer's messages can take: a single item,
+// and a batchMarker-wrapped batch of individually encrypted items.
 func TestHandleEncryptedMessageDecodesLegacySingleAndBatch(t *testing.T) {
 	const token = "shared-secret-token"
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
-	tr.EnableEncryptedSelfCompression(token, true) // exit-node role, so it decrypts what a client (isExitNode=false) sent
+	tr.EnableEncryptedSelfCompression(token, true) // exit-node role, decrypts what a client sent
 
 	var received [][]byte
 	tr.Receive(func(data []byte) { received = append(received, append([]byte(nil), data...)) })
 
-	// A peer (client role) derives its OWN send key the same way
-	// transport.NewEncryptedTransport(..., false) would.
 	peerSend, _ := transport.DeriveDirectionalKeys(token, false, "")
 
 	raw := []byte("a raw packet from an unmodified encrypted peer")
@@ -895,8 +792,6 @@ func TestHandleEncryptedMessageDecodesLegacySingleAndBatch(t *testing.T) {
 	}
 }
 
-// TestHandleEncryptedMessageDecodesNewFormat is the receive-side
-// counterpart of TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed.
 func TestHandleEncryptedMessageDecodesNewFormat(t *testing.T) {
 	const token = "shared-secret-token"
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
@@ -920,12 +815,8 @@ func TestHandleEncryptedMessageDecodesNewFormat(t *testing.T) {
 	}
 }
 
-// TestHandleEncryptedMessageDropsUndecryptableData is the security-critical
-// guard: anything that fails to decrypt (wrong token, corrupted data, a
-// peer not actually encrypting) must be DROPPED, never passed to
-// CallReceive as if it were valid plaintext - there is no lenient fallback
-// here, matching transport.EncryptedTransport.Receive's own strict
-// contract.
+// Security-critical: anything that fails to decrypt must be dropped, never
+// passed to CallReceive as if it were valid plaintext.
 func TestHandleEncryptedMessageDropsUndecryptableData(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableEncryptedSelfCompression("shared-secret-token", true)
@@ -952,12 +843,6 @@ func TestHandleEncryptedMessageDropsUndecryptableData(t *testing.T) {
 
 // --- normalizeDocURL -------------------------------------------------
 
-// TestNormalizeDocURLRewritesDiskShareLinks guards the actual feature this
-// function exists for: disk.yandex.ru/i/<hash> share links (what a user
-// gets from Yandex Disk's own "share" button) and docs.yandex.ru edit links
-// serve the same client-config-bearing page for a supported document under
-// different hostnames - fetchDocInfo only knows how to ask docs.yandex.ru,
-// so a share link must be rewritten before it ever reaches an HTTP request.
 func TestNormalizeDocURLRewritesDiskShareLinks(t *testing.T) {
 	cases := map[string]string{
 		"https://disk.yandex.ru/i/AbCdEfGh123":         "https://docs.yandex.ru/i/AbCdEfGh123",
@@ -1169,10 +1054,8 @@ func TestFetchDocInfoValidConfig(t *testing.T) {
 		t.Errorf("WsURL = %q, want it to contain the doc key", info.WsURL)
 	}
 
-	// Guards the actual production issue this is fixing: a request that
-	// sets only User-Agent (and a bare, incomplete one at that) isn't a
-	// shape any real browser produces - itself a bot-detection signal
-	// independent of the requesting IP's own reputation.
+	// A request with only a bare User-Agent isn't a shape any real browser
+	// produces - itself a bot-detection signal.
 	if ua := gotHeaders.Get("User-Agent"); ua != browserUserAgent {
 		t.Errorf("User-Agent = %q, want %q", ua, browserUserAgent)
 	}

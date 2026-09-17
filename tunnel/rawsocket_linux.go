@@ -21,25 +21,17 @@ import (
 // never one per key.
 //
 // On Linux, a SOCK_RAW socket bound to a protocol receives a copy of EVERY
-// matching packet that hits the host, regardless of destination port -
-// there is no way to narrow that at the socket level. Before this, each
-// managed-mode worker (one per active key - see nodeagent.Orchestrator)
-// opened its own pair of raw sockets, so with N concurrently active keys
-// the kernel delivered, and each of N independent readLoop goroutines
-// independently parsed, header-checked, and (in all but one case) silently
-// discarded, its own full copy of every single packet on the host: O(N)
-// work per real packet instead of O(1), on top of N-1 wasted wakeups/
-// syscalls for every packet not addressed to a given worker. At more than
-// a handful of concurrent keys this dominates the exit node's CPU well
-// before real user traffic does - exactly the kind of bottleneck that
-// makes a fleet "choke" as the user count grows rather than scale with it.
+// matching packet on the host regardless of destination port - there's no
+// way to narrow that at the socket level. One raw socket per worker (one
+// per active key) would mean N independent readLoops each parsing and
+// mostly discarding a full copy of every packet: O(N) work per real packet,
+// dominating CPU well before real user traffic does at more than a handful
+// of concurrent keys.
 //
-// One shared instance fixes that: the kernel and this process each see and
-// handle a real packet once, then demux it by destination port straight to
-// whichever worker's transport actually owns that port - ports are already
-// globally unique per worker (nodeagent hands each one a disjoint range;
-// see TCPTunnel.SetPortRange's doc comment), so this is a plain lookup, not
-// a new coordination problem.
+// One shared instance fixes that: the kernel and this process each handle a
+// real packet once, then demux by destination port to whichever worker
+// owns that port (ports are globally unique per worker - see
+// TCPTunnel.SetPortRange).
 type rawSocketCore struct {
 	sendFd, recvFd, recvUDPFd int
 	localIP                   [4]byte

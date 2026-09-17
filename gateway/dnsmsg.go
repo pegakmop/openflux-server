@@ -50,9 +50,6 @@ func skipDNSName(msg []byte, off int) (int, bool) {
 }
 
 // readDNSName decodes a (possibly compressed) name starting at off into a
-// dotted, lowercased label sequence. Compression pointers are followed up to
-// a fixed depth to frustrate pointer loops.
-// readDNSName decodes a (possibly compressed) name starting at off into a
 // dotted, lowercased label sequence. The returned offset is where the name
 // field ends in the message itself (the position right after the first
 // compression pointer, or after the terminating zero for an in-place name),
