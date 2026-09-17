@@ -16,10 +16,14 @@ control plane и gomobile-биндинги для
 Client (SOCKS5) --> Transport --> Exit Node --> Internet
 ```
 
-TCP-пакеты передаются через Transport. На данный момент доступны два транспорта:
-1. Yandex — отправляет пакеты через курсорные сообщения Yandex Docs;
-2. Max — отправляет пакеты через WebRTC DataChannel (только десктопный клиент/exit-node —
-   Android-приложение его не поддерживает; почему — см. комментарий к пакету в `mobile/mobile.go`).
+TCP-пакеты передаются через Transport. Доступные транспорты (`--transport`):
+1. `yandex`/`yandex_multistream`/`volga` — отправляют пакеты через курсорные сообщения Yandex Docs;
+2. `oneme` (Max) — отправляет пакеты через WebRTC DataChannel (только десктопный клиент/exit-node —
+   Android-приложение его не поддерживает; почему — см. комментарий к пакету в `mobile/mobile.go`);
+3. `cupsonline` — отправляет пакеты через синхронизацию курсоров в комнатах для интервью
+   cups.online (только десктоп, перенесено из апстрима);
+4. `mailru` — отправляет пакеты через курсорные сообщения Mail.ru Docs, тот же протокол
+   совместного редактирования, что и у `yandex` (только десктоп, перенесено из апстрима).
 
 Клиентская часть запускает SOCKS5-прокси, выходная нода декапсулирует и пересылает пакеты в пункт
 назначения.
@@ -37,8 +41,10 @@ TCP-пакеты передаются через Transport. На данный м
 main.go
 transport/
 ├── transport.go      # Transport interface
-├── yandex/           # Yandex Docs backend
-└── oneme/            # MAX Messenger backend (только десктоп)
+├── yandex/           # Yandex Docs backend (также Volga, yandex_multistream)
+├── oneme/            # MAX Messenger backend (только десктоп)
+├── cupsonline/       # cups.online backend (только десктоп, перенесено из апстрима)
+└── mailru/           # Mail.ru Docs backend (только десктоп, перенесено из апстрима)
 tunnel/
 ├── tunnel.go         # TCP tunnel core
 ├── endpoint.go       # Virtual NIC
@@ -129,21 +135,22 @@ sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 | `--maxToken`  | ``                  | Токен авторизации (Max)        |
 | `--maxUid`    | ``                  | ID пользователя (Max)          |
 | `--debug`     | `false`             | Включить подробное логирование |
-| `--transport` | `yandex`            | Выбор транспорта               |
+| `--transport` | `yandex`            | Выбор транспорта (`yandex`, `volga`, `oneme`, `yandex_multistream`, `cupsonline`, `mailru`) |
 | `--managed`      | `false` | Только для exit-node: получать активные ключи из controlplane вместо одного `--url` |
 | `--control-url`  | ``      | Managed-режим: базовый URL сервиса `openflux-control` |
 | `--node-token`   | ``      | Managed-режим: токен этой ноды, выданный controlplane |
 | `--mode`         | `raw`   | Только для exit-node: `raw` (нужен root, релей обычного UDP) или `proxy` (без root, только TCP) |
 | `--local-ip`     | ``      | Только для raw-режима: egress-IP ноды, чтобы сузить RST-drop правило через `-s` |
-| `--codec`        | `legacy` | Кодек канала для `--transport volga`/`oneme`: `legacy` (LZ4 на каждый пакет, без изменений) или `batched` (склеивать пачку исходящих пакетов в одно zstd-сжатое сообщение транспорта — см. ниже). Обе стороны должны совпадать. Игнорируется для `yandex`/`yandex_multistream` — см. ниже. |
+| `--codec`        | `legacy` | Кодек канала для `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (LZ4 на каждый пакет, без изменений) или `batched` (склеивать пачку исходящих пакетов в одно zstd-сжатое сообщение транспорта — см. ниже). Обе стороны должны совпадать. Игнорируется для `yandex`/`yandex_multistream` — см. ниже. |
 
 Портировано из апстрима [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux):
 `batched` склеивает пачку исходящих пакетов туннеля (плюс короткое окно
 ожидания «отставших» — настраивается через переменные окружения
 `OPENFLUX_BATCH_BYTES` / `OPENFLUX_BATCH_COUNT` / `OPENFLUX_BATCH_LINGER_MS`)
 в одно zstd-сжатое сообщение транспорта вместо одного сообщения на пакет.
-Относится только к `volga`/`oneme`; клиент и exit-нода должны использовать
-одинаковый `--codec` для них — иначе не смогут разобрать кадры друг друга.
+Относится только к `volga`/`oneme`/`cupsonline`/`mailru`; клиент и exit-нода
+должны использовать одинаковый `--codec` для них — иначе не смогут разобрать
+кадры друг друга.
 
 Транспорты `yandex`/`yandex_multistream` `--codec` вообще не используют —
 они уже склеивают пакеты сами, и автоматически согласуют с пиром переход на

@@ -15,6 +15,8 @@ import (
 	"universal-bypass-tool/nodeagent"
 	"universal-bypass-tool/socks5"
 	"universal-bypass-tool/transport"
+	"universal-bypass-tool/transport/cupsonline"
+	"universal-bypass-tool/transport/mailru"
 	"universal-bypass-tool/transport/oneme"
 	"universal-bypass-tool/transport/yandex"
 	"universal-bypass-tool/tunnel"
@@ -35,13 +37,13 @@ func main() {
 	client := flag.Bool("client", false, "Run as client")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	socksAddr := flag.String("socks5", ":1080", "SOCKS5 address")
-	transportType := flag.String("transport", "yandex", "Transport type (yandex, google, custom)")
+	transportType := flag.String("transport", "yandex", "Transport type (yandex, volga, oneme, yandex_multistream, cupsonline, mailru)")
 	managed := flag.Bool("managed", false, "Exit node only: fetch active keys from a controlplane instance instead of a single --url")
 	controlURL := flag.String("control-url", "", "Managed mode: base URL of the openflux-control service")
 	nodeToken := flag.String("node-token", "", "Managed mode: this node's bearer token from controlplane")
 	mode := flag.String("mode", "raw", "Exit node only: 'raw' (default, needs root; raw socket + gvisor NAT, forwards any IP protocol) or 'proxy' (no root, no raw socket; TCP only - see README)")
 	localIP := flag.String("local-ip", "", "Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with -s instead of host-wide")
-	codec := flag.String("codec", "legacy", "Wire codec for --transport volga/oneme: 'legacy' (default, per-packet LZ4 - unchanged) or 'batched' (coalesce bursts into one zstd-compressed message per transport send; both ends must agree - see README). Ignored for yandex/yandex_multistream, which auto-negotiate their own whole-batch zstd format with the peer - see README.")
+	codec := flag.String("codec", "legacy", "Wire codec for --transport volga/oneme/cupsonline/mailru: 'legacy' (default, per-packet LZ4 - unchanged) or 'batched' (coalesce bursts into one zstd-compressed message per transport send; both ends must agree - see README). Ignored for yandex/yandex_multistream, which auto-negotiate their own whole-batch zstd format with the peer - see README.")
 	flag.StringVar(&globalDocUrl, "url", "http://#", "Document URL. If u use Yandex.Docs transport")
 	docUrls := flag.String("urls", "", "Comma-separated doc URLs for --transport yandex_multistream (2+ required, same list on both ends)")
 	flag.StringVar(&maxToken, "maxToken", "", "MAX call user id. If u use MAX transport")
@@ -128,6 +130,10 @@ func main() {
 	case "oneme":
 		uidint, _ := strconv.ParseInt(maxUid, 10, 64)
 		trans = wrapCodec(oneme.NewOneMeTransport(*exitNode, maxToken, uidint, config))
+	case "cupsonline":
+		trans = wrapCodec(cupsonline.NewCupsonlineTransport(globalDocUrl, config, !*exitNode))
+	case "mailru":
+		trans = wrapCodec(mailru.NewMailruDocsTransport(globalDocUrl, config))
 	case "yandex_multistream":
 		urls := strings.Split(*docUrls, ",")
 		if len(urls) < 2 {

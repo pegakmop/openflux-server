@@ -15,10 +15,14 @@ out onto a VPS).
 Client (SOCKS5) --> Transport --> Exit Node --> Internet
 ```
 
-TCP packets are sent via Transport. Currently, there are two transports available:
-1. Yandex - sends packets via Yandex Docs cursor messages;
-2. Max - sends packets via WebRTC DataChannel (desktop client/exit-node only - the Android app
-   doesn't support it; see `mobile/mobile.go`'s package comment for why).
+TCP packets are sent via Transport. Available transports (`--transport`):
+1. `yandex`/`yandex_multistream`/`volga` - send packets via Yandex Docs cursor messages;
+2. `oneme` (Max) - sends packets via WebRTC DataChannel (desktop client/exit-node only - the
+   Android app doesn't support it; see `mobile/mobile.go`'s package comment for why);
+3. `cupsonline` - sends packets via cups.online's collaborative interview-room cursor sync
+   (desktop client/exit-node only, ported from upstream);
+4. `mailru` - sends packets via Mail.ru Docs cursor messages, the same coauthoring-protocol
+   family as `yandex` (desktop client/exit-node only, ported from upstream).
 
 Client side runs a SOCKS5 proxy, exit node decapsulates and forwards packets to destination point.
 
@@ -34,8 +38,10 @@ Client side runs a SOCKS5 proxy, exit node decapsulates and forwards packets to 
 main.go
 transport/
 ├── transport.go      # Transport interface
-├── yandex/           # Yandex Docs backend
-└── oneme/            # MAX Messenger backend (desktop only)
+├── yandex/           # Yandex Docs backend (also Volga, yandex_multistream)
+├── oneme/            # MAX Messenger backend (desktop only)
+├── cupsonline/       # cups.online backend (desktop only, ported from upstream)
+└── mailru/           # Mail.ru Docs backend (desktop only, ported from upstream)
 tunnel/
 ├── tunnel.go         # TCP tunnel core
 ├── endpoint.go       # Virtual NIC
@@ -127,21 +133,22 @@ Then set up a SOCKS5 proxy in your browser at localhost:1080.
 | `--maxToken`  | ``                  | Auth token (Max)           |
 | `--maxUid`    | ``                  | User ID (Max)              |
 | `--debug`     | `false`             | Enable verbose logging     |
-| `--transport` | `yandex`            | Select transport backend   |
+| `--transport` | `yandex`            | Select transport backend (`yandex`, `volga`, `oneme`, `yandex_multistream`, `cupsonline`, `mailru`) |
 | `--managed`      | `false` | Exit node only: fetch active keys from a controlplane instance instead of a single `--url` |
 | `--control-url`  | ``      | Managed mode: base URL of the `openflux-control` service |
 | `--node-token`   | ``      | Managed mode: this node's bearer token from controlplane |
 | `--mode`         | `raw`   | Exit node only: `raw` (needs root, general UDP relay) or `proxy` (no root, TCP only) |
 | `--local-ip`     | ``      | Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with `-s` |
-| `--codec`        | `legacy` | Wire codec for `--transport volga`/`oneme`: `legacy` (per-packet LZ4, unchanged) or `batched` (coalesce bursts into one zstd-compressed message per transport send - see below). Both ends must agree. Ignored for `yandex`/`yandex_multistream` - see below. |
+| `--codec`        | `legacy` | Wire codec for `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (per-packet LZ4, unchanged) or `batched` (coalesce bursts into one zstd-compressed message per transport send - see below). Both ends must agree. Ignored for `yandex`/`yandex_multistream` - see below. |
 
 Ported from upstream [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux):
 `batched` coalesces a burst of outgoing tunnel packets (plus a short linger
 window to catch stragglers - both tunable via `OPENFLUX_BATCH_BYTES` /
 `OPENFLUX_BATCH_COUNT` / `OPENFLUX_BATCH_LINGER_MS` env vars) into a single
 zstd-compressed message per transport send, instead of one message per
-packet. Applies to `volga`/`oneme` only; a client and exit node must run the
-same `--codec` for these - they can't decode each other's frames otherwise.
+packet. Applies to `volga`/`oneme`/`cupsonline`/`mailru` only; a client and
+exit node must run the same `--codec` for these - they can't decode each
+other's frames otherwise.
 
 The `yandex`/`yandex_multistream` transports don't use `--codec` at all -
 they already coalesce internally, and auto-negotiate whole-batch zstd

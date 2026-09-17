@@ -56,3 +56,19 @@ func Debugf(format string, args ...interface{}) {
 func IsVerbose() bool {
 	return verbose
 }
+
+// SafeGo runs fn in a new goroutine with a recover() wrapped around it, so a
+// panic inside fn is logged (as [PANIC] name: ...) instead of taking down
+// the whole process - for a long-lived background loop (a keepalive ticker,
+// a transport's connection loop) where nothing else on the call stack would
+// catch it.
+func SafeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				Debugf("[PANIC] recovered in %s: %v", name, r)
+			}
+		}()
+		fn()
+	}()
+}
