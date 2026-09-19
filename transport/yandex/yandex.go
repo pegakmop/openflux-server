@@ -121,6 +121,13 @@ type YandexDocsTransport struct {
 	peerEncSelfCompress atomic.Bool
 
 	wakeReconnect chan struct{}
+
+	// tag identifies this instance's log lines on a node running many keys at once - a bare "[YDOCS]" line can't otherwise be traced back to which key it belongs to.
+	tag string
+}
+
+func (t *YandexDocsTransport) debugf(format string, args ...interface{}) {
+	utils.Debugf("[YDOCS/%s] "+format, append([]interface{}{t.tag}, args...)...)
 }
 
 // EnableSelfCompression makes writerLoop zstd-compress a whole batch of raw packets once the peer's keepalive proves it understands zstdBatchMarker, beating per-packet LZ4's missed cross-packet redundancy; not for use alongside external CompressedTransport wrapping.
@@ -144,9 +151,11 @@ func (t *YandexDocsTransport) enableEncryptedSelfCompression(token string, isExi
 }
 
 func NewYandexDocsTransport(url string, config transport.TransportConfig) *YandexDocsTransport {
+	normalized := normalizeDocURL(url)
 	t := &YandexDocsTransport{
 		BaseTransport: transport.NewBaseTransport(config),
-		url:           normalizeDocURL(url),
+		url:           normalized,
+		tag:           fmt.Sprintf("%06x", crc32.ChecksumIEEE([]byte(normalized))),
 	}
 	t.baseUserID = randUserID()
 	return t
@@ -206,7 +215,7 @@ func (t *YandexDocsTransport) Send(data []byte) error {
 		return nil
 	default:
 		// Previously silent: the caller (tunnelEP's outgoing handler) drops this error on the floor, so a drop here was invisible in every log.
-		utils.Debugf("[YDOCS] write queue full, dropping %d bytes", len(data))
+		t.debugf("write queue full, dropping %d bytes", len(data))
 		return fmt.Errorf("write queue full")
 	}
 }
@@ -216,7 +225,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		return
 	}
 
-	utils.Debugf("[YDOCS] connectToDoc attempt %d", attempt)
+	t.debugf("connectToDoc attempt %d", attempt)
 	t.EmitEvent(transport.EventConnecting, strconv.Itoa(attempt+1))
 
 	go func() {
@@ -234,7 +243,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 
 		info, err := t.fetchDocInfo(t.url, userID)
 		if err != nil {
-			utils.Debugf("[YDOCS] fetchDocInfo failed: %v", err)
+			t.debugf("fetchDocInfo failed: %v", err)
 			t.scheduleReconnect(attempt, reasonFetchFailed, err)
 			return
 		}
@@ -255,7 +264,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 
 		conn, _, err := dialer.Dial(info.WsURL, headers)
 		if err != nil {
-			utils.Debugf("[YDOCS] WebSocket dial failed: %v", err)
+			t.debugf("WebSocket dial failed: %v", err)
 			t.scheduleReconnect(attempt, reasonDialFailed, err)
 			return
 		}
@@ -263,7 +272,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		// The engine.io/socket.io handshake must complete before anything else goes over this socket, or OnlyOffice's backend tears the connection down with close code 1005.
 		readTimeout, err := t.performHandshake(conn, info.Token)
 		if err != nil {
-			utils.Debugf("[YDOCS] handshake failed: %v", err)
+			t.debugf("handshake failed: %v", err)
 			conn.Close()
 			t.scheduleReconnect(attempt, reasonHandshakeFailed, err)
 			return
@@ -304,13 +313,13 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		}
 		messagePart, err := json.Marshal([]interface{}{"message", authData})
 		if err != nil {
-			utils.Debugf("[YDOCS] marshal auth message failed: %v", err)
+			t.debugf("marshal auth message failed: %v", err)
 			conn.Close()
 			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
 		}
 		if err := session.safeWrite(websocket.TextMessage, []byte(fmt.Sprintf("42%s", string(messagePart)))); err != nil {
-			utils.Debugf("[YDOCS] send auth message failed: %v", err)
+			t.debugf("send auth message failed: %v", err)
 			conn.Close()
 			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
@@ -324,7 +333,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			conn.SetReadDeadline(time.Now().Add(readTimeout))
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				utils.Debugf("[YDOCS] Read error: %v", err)
+				t.debugf("Read error: %v", err)
 				t.SetConnected(false)
 				conn.Close()
 				// A session that stayed up a while before dropping counts as a normal blip, not evidence backoff should keep growing, or a long-lived transport's backoff ratchets up and stays maxed forever.
@@ -389,7 +398,7 @@ func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token strin
 			return readTimeout, nil
 
 		default:
-			utils.Debugf("[YDOCS] unexpected message during handshake: %s", text)
+			t.debugf("unexpected message during handshake: %s", text)
 		}
 	}
 }
@@ -411,7 +420,7 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 			for _, pkt := range batch {
 				ciphertext, err := transport.Seal(t.encSend, t.encSendCtr.Add(1), transport.Compress(pkt))
 				if err != nil {
-					utils.Debugf("[YDOCS] encrypt failed, dropping packet: %v", err)
+					t.debugf("encrypt failed, dropping packet: %v", err)
 					continue
 				}
 				sealed = append(sealed, ciphertext)
@@ -488,14 +497,14 @@ func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 
 	t.markSent(framed)
 	if utils.IsVerbose() {
-		utils.Debugf("[YDOCS] -> %d bytes (%d packets)\n", len(framed), len(batch))
+		t.debugf("-> %d bytes (%d packets)\n", len(framed), len(batch))
 	}
 
 	payload := base64.StdEncoding.EncodeToString(framed)
 	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-		utils.Debugf("[YDOCS] Write error: %v", err)
+		t.debugf("Write error: %v", err)
 	}
 }
 
@@ -507,14 +516,14 @@ func (t *YandexDocsTransport) sendZstdBatch(session *DocSession, batch [][]byte)
 
 	t.markSent(framed)
 	if utils.IsVerbose() {
-		utils.Debugf("[YDOCS] -> %d bytes (%d packets, zstd batch)\n", len(framed), len(batch))
+		t.debugf("-> %d bytes (%d packets, zstd batch)\n", len(framed), len(batch))
 	}
 
 	payload := base64.StdEncoding.EncodeToString(framed)
 	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-		utils.Debugf("[YDOCS] Write error: %v", err)
+		t.debugf("Write error: %v", err)
 	}
 }
 
@@ -526,34 +535,34 @@ func (t *YandexDocsTransport) sendEncryptedZstdBatch(session *DocSession, batch 
 
 	ciphertext, err := transport.Seal(t.encSend, t.encSendCtr.Add(1), plaintext)
 	if err != nil {
-		utils.Debugf("[YDOCS] encrypt failed, dropping batch: %v", err)
+		t.debugf("encrypt failed, dropping batch: %v", err)
 		return
 	}
 
 	t.markSent(ciphertext)
 	if utils.IsVerbose() {
-		utils.Debugf("[YDOCS] -> %d bytes (%d packets, encrypted zstd batch)\n", len(ciphertext), len(batch))
+		t.debugf("-> %d bytes (%d packets, encrypted zstd batch)\n", len(ciphertext), len(batch))
 	}
 
 	payload := base64.StdEncoding.EncodeToString(ciphertext)
 	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-		utils.Debugf("[YDOCS] Write error: %v", err)
+		t.debugf("Write error: %v", err)
 	}
 }
 
 func (t *YandexDocsTransport) sendSingle(session *DocSession, packet []byte) {
 	t.markSent(packet)
 	if utils.IsVerbose() {
-		utils.Debugf("[YDOCS] -> %d bytes (unbatched)\n", len(packet))
+		t.debugf("-> %d bytes (unbatched)\n", len(packet))
 	}
 
 	payload := base64.StdEncoding.EncodeToString(packet)
 	msg := fmt.Sprintf(`42["message",{"type":"cursor","cursor":"18;%s"}]`, payload)
 
 	if err := session.safeWrite(websocket.TextMessage, []byte(msg)); err != nil {
-		utils.Debugf("[YDOCS] Write error: %v", err)
+		t.debugf("Write error: %v", err)
 	}
 }
 
@@ -606,7 +615,7 @@ func (t *YandexDocsTransport) keepAliveLoop() {
 		// IsConnected() too, not just session/Conn - avoids the same pre-auth send window writerLoop had.
 		if session != nil && session.Conn != nil && t.IsConnected() {
 			if err := session.safeWrite(websocket.TextMessage, []byte(keepAliveMsg)); err != nil {
-				utils.Debugf("[YDOCS] Keep-alive failed: %v", err)
+				t.debugf("Keep-alive failed: %v", err)
 				t.SetConnected(false)
 				session.Conn.Close()
 			}
@@ -648,19 +657,19 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 
 		decoded, err := base64.StdEncoding.DecodeString(base64Str)
 		if err != nil {
-			utils.Debugf("[YDOCS] Base64 decode error: %v", err)
+			t.debugf("Base64 decode error: %v", err)
 			return
 		}
 
 		if t.wasRecentlySent(decoded) {
 			if utils.IsVerbose() {
-				utils.Debugf("[YDOCS] dropped self-echo (%d bytes)\n", len(decoded))
+				t.debugf("dropped self-echo (%d bytes)\n", len(decoded))
 			}
 			return
 		}
 
 		if utils.IsVerbose() {
-			utils.Debugf("[YDOCS] <- %d bytes\n", len(decoded))
+			t.debugf("<- %d bytes\n", len(decoded))
 		}
 
 		t.RecordReceive(len(decoded))
@@ -673,7 +682,7 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		if len(decoded) > 0 && decoded[0] == zstdBatchMarker {
 			pkts, err := transport.DecodeBatch(decoded[1:])
 			if err != nil {
-				utils.Debugf("[YDOCS] zstd batch decode error: %v", err)
+				t.debugf("zstd batch decode error: %v", err)
 				return
 			}
 			for _, pkt := range pkts {
@@ -691,7 +700,7 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 				}
 				raw, err := transport.Decompress(pkt)
 				if err != nil {
-					utils.Debugf("[YDOCS] batch item decompress error: %v", err)
+					t.debugf("batch item decompress error: %v", err)
 					continue
 				}
 				t.CallReceive(raw)
@@ -705,7 +714,7 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 		}
 		raw, err := transport.Decompress(decoded)
 		if err != nil {
-			utils.Debugf("[YDOCS] decompress error: %v", err)
+			t.debugf("decompress error: %v", err)
 			return
 		}
 		t.CallReceive(raw)
@@ -718,12 +727,12 @@ func (t *YandexDocsTransport) handleEncryptedMessage(decoded []byte) {
 		for _, item := range decodeBatch(decoded[1:]) {
 			plain, err := transport.Open(t.encRecv, item)
 			if err != nil {
-				utils.Debugf("[YDOCS] batch item decrypt failed: %v", err)
+				t.debugf("batch item decrypt failed: %v", err)
 				continue
 			}
 			raw, err := transport.Decompress(plain)
 			if err != nil {
-				utils.Debugf("[YDOCS] batch item decompress error: %v", err)
+				t.debugf("batch item decompress error: %v", err)
 				continue
 			}
 			t.CallReceive(raw)
@@ -733,14 +742,14 @@ func (t *YandexDocsTransport) handleEncryptedMessage(decoded []byte) {
 
 	plaintext, err := transport.Open(t.encRecv, decoded)
 	if err != nil {
-		utils.Debugf("[YDOCS] decrypt failed - dropping message: %v", err)
+		t.debugf("decrypt failed - dropping message: %v", err)
 		return
 	}
 
 	if len(plaintext) > 0 && plaintext[0] == zstdBatchMarker {
 		pkts, err := transport.DecodeBatch(plaintext[1:])
 		if err != nil {
-			utils.Debugf("[YDOCS] encrypted zstd batch decode error: %v", err)
+			t.debugf("encrypted zstd batch decode error: %v", err)
 			return
 		}
 		for _, pkt := range pkts {
@@ -751,7 +760,7 @@ func (t *YandexDocsTransport) handleEncryptedMessage(decoded []byte) {
 
 	raw, err := transport.Decompress(plaintext)
 	if err != nil {
-		utils.Debugf("[YDOCS] decompress error: %v", err)
+		t.debugf("decompress error: %v", err)
 		return
 	}
 	t.CallReceive(raw)
@@ -798,7 +807,7 @@ func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, 
 		select {
 		case <-time.After(delay):
 		case <-wake:
-			utils.Debugf("[YDOCS] backoff wait cut short by ForceReconnect")
+			t.debugf("backoff wait cut short by ForceReconnect")
 		}
 
 		t.Mu.Lock()
@@ -824,7 +833,7 @@ func (t *YandexDocsTransport) ForceReconnect() {
 	t.Mu.Unlock()
 
 	if live && session != nil && session.Conn != nil {
-		utils.Debugf("[YDOCS] force-reconnect: dropping live session to re-dial")
+		t.debugf("force-reconnect: dropping live session to re-dial")
 		_ = session.Conn.Close()
 		return
 	}
@@ -871,7 +880,7 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	htmlBytes, _ := io.ReadAll(resp.Body)
 	html := string(htmlBytes)
 
-	utils.Debugf("[YDOCS] fetchDocInfo GET %s -> %d (%d bytes)", url, resp.StatusCode, len(html))
+	t.debugf("fetchDocInfo GET %s -> %d (%d bytes)", url, resp.StatusCode, len(html))
 
 	var cookies []string
 	for _, c := range resp.Cookies() {
@@ -883,13 +892,13 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	if len(matches) < 2 {
 		lower := strings.ToLower(html)
 		if strings.Contains(lower, "captcha") {
-			utils.Debugf("[YDOCS] response looks like a CAPTCHA/bot-check page, not the doc editor")
+			t.debugf("response looks like a CAPTCHA/bot-check page, not the doc editor")
 		}
 		preview := html
 		if len(preview) > 2000 {
 			preview = preview[:2000]
 		}
-		utils.Debugf("[YDOCS] HTML preview: %s", preview)
+		t.debugf("HTML preview: %s", preview)
 		return YandexDocsInfo{}, fmt.Errorf("config not found")
 	}
 
@@ -901,39 +910,39 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	// Every config lookup is a checked type assertion since this runs in a goroutine with no recover(), so an unchecked assertion would crash the process on an unexpected page shape.
 	officeAction, ok := config["officeActionData"].(map[string]interface{})
 	if !ok {
-		utils.Debugf("[YDOCS] config top-level keys: %v", mapKeys(config))
+		t.debugf("config top-level keys: %v", mapKeys(config))
 		return YandexDocsInfo{}, fmt.Errorf("officeActionData missing or malformed")
 	}
 
 	editorConfigRaw, ok := officeAction["editor_config"].(map[string]interface{})
 	if !ok || editorConfigRaw == nil {
-		utils.Debugf("[YDOCS] officeActionData keys: %v", mapKeys(officeAction))
+		t.debugf("officeActionData keys: %v", mapKeys(officeAction))
 		return YandexDocsInfo{}, fmt.Errorf("editor_config nil - will reconnect")
 	}
 
 	balancerURL, ok := officeAction["balancer_url"].(string)
 	if !ok {
 		// officeActionData + editor_config present but balancer_url missing is the confirmed signature of a newer-generation document this transport can't talk to; only YandexVolgaTransport can.
-		utils.Debugf("[YDOCS] officeActionData keys: %v, editor_config keys: %v", mapKeys(officeAction), mapKeys(editorConfigRaw))
+		t.debugf("officeActionData keys: %v, editor_config keys: %v", mapKeys(officeAction), mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing - this document looks like a newer Yandex Docs type this transport doesn't support; try the Volga transport for this doc_url instead")
 	}
 	host := strings.TrimPrefix(balancerURL, "https://")
 
 	document, ok := editorConfigRaw["document"].(map[string]interface{})
 	if !ok {
-		utils.Debugf("[YDOCS] editor_config keys: %v", mapKeys(editorConfigRaw))
+		t.debugf("editor_config keys: %v", mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("document missing or malformed")
 	}
 
 	token, ok := editorConfigRaw["token"].(string)
 	if !ok {
-		utils.Debugf("[YDOCS] editor_config keys: %v", mapKeys(editorConfigRaw))
+		t.debugf("editor_config keys: %v", mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("editor_config.token missing or malformed")
 	}
 
 	docKey, ok := document["key"].(string)
 	if !ok {
-		utils.Debugf("[YDOCS] document keys: %v", mapKeys(document))
+		t.debugf("document keys: %v", mapKeys(document))
 		return YandexDocsInfo{}, fmt.Errorf("document.key missing or malformed")
 	}
 
