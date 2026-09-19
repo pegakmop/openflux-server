@@ -205,6 +205,8 @@ func (t *YandexDocsTransport) Send(data []byte) error {
 		t.RecordSend(len(data))
 		return nil
 	default:
+		// Previously silent: the caller (tunnelEP's outgoing handler) drops this error on the floor, so a drop here was invisible in every log.
+		utils.Debugf("[YDOCS] write queue full, dropping %d bytes", len(data))
 		return fmt.Errorf("write queue full")
 	}
 }
