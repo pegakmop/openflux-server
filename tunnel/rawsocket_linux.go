@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,12 +33,36 @@ var (
 	sharedRawCoreErr  error
 )
 
+// rawReaderGoroutines is how many goroutines concurrently call Recvfrom on the same shared raw
+// socket per protocol - multiple readers on one fd is safe (the kernel hands each blocking call a
+// distinct queued packet, same as any other socket type) and is what actually lets per-packet work
+// (header parse, checksum, dispatch) use more than one CPU core: a single reader serializes every
+// key's traffic through it regardless of core count, which becomes the throughput ceiling for the
+// whole node once enough keys are active to saturate one core - the very thing this shared-core
+// design was supposed to scale past. TCP handles any resulting reordering the same way it already
+// handles real network jitter, so this doesn't trade correctness for throughput.
+func rawReaderGoroutines() int {
+	n := runtime.NumCPU()
+	if n < 2 {
+		return 2
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
+}
+
 func getSharedRawCore() (*rawSocketCore, error) {
 	sharedRawCoreOnce.Do(func() {
 		sharedRawCore, sharedRawCoreErr = newRawSocketCore()
 		if sharedRawCoreErr == nil {
-			go sharedRawCore.readLoop(sharedRawCore.recvFd, 6)
-			go sharedRawCore.readLoop(sharedRawCore.recvUDPFd, 17)
+			n := rawReaderGoroutines()
+			for i := 0; i < n; i++ {
+				go sharedRawCore.readLoop(sharedRawCore.recvFd, 6)
+			}
+			for i := 0; i < n; i++ {
+				go sharedRawCore.readLoop(sharedRawCore.recvUDPFd, 17)
+			}
 		}
 	})
 	return sharedRawCore, sharedRawCoreErr

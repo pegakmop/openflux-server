@@ -2,6 +2,13 @@ package tunnel
 
 import "testing"
 
+func TestRawReaderGoroutinesStaysWithinBounds(t *testing.T) {
+	n := rawReaderGoroutines()
+	if n < 2 || n > 8 {
+		t.Fatalf("rawReaderGoroutines() = %d, want between 2 and 8", n)
+	}
+}
+
 func TestRawSocketCoreActivePortsRoutesToOwningWorker(t *testing.T) {
 	core := &rawSocketCore{}
 	a := &RawSocketEndpoint{core: core}
