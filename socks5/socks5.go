@@ -1,6 +1,7 @@
 package socks5
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -65,34 +66,51 @@ func (s *SOCKS5Server) Stop() error {
 	return l.Close()
 }
 
+// handleConnection parses the handshake with io.ReadFull, not single Read calls - TCP is a byte
+// stream, and a request split across multiple packets (common on mobile networks) would otherwise
+// be silently truncated or misparsed.
 func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
+	r := bufio.NewReader(clientConn)
 
-	buf := make([]byte, 256)
-	n, err := clientConn.Read(buf)
-	if err != nil || n < 2 || buf[0] != 0x05 {
+	greeting := make([]byte, 2)
+	if _, err := io.ReadFull(r, greeting); err != nil || greeting[0] != 0x05 {
 		return
 	}
-
+	if _, err := io.ReadFull(r, make([]byte, greeting[1])); err != nil {
+		return
+	}
 	clientConn.Write([]byte{0x05, 0x00})
 
-	n, err = clientConn.Read(buf)
-	if err != nil || n < 10 || buf[1] != 0x01 {
+	reqHeader := make([]byte, 4)
+	if _, err := io.ReadFull(r, reqHeader); err != nil {
+		return
+	}
+	if reqHeader[1] != 0x01 {
+		clientConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) // command not supported
 		return
 	}
 
 	var targetAddr string
-	switch buf[3] {
+	switch reqHeader[3] {
 	case 0x01:
-		targetAddr = fmt.Sprintf("%d.%d.%d.%d:%d",
-			buf[4], buf[5], buf[6], buf[7],
-			uint16(buf[8])<<8|uint16(buf[9]))
+		addr := make([]byte, 6)
+		if _, err := io.ReadFull(r, addr); err != nil {
+			return
+		}
+		targetAddr = fmt.Sprintf("%d.%d.%d.%d:%d", addr[0], addr[1], addr[2], addr[3], uint16(addr[4])<<8|uint16(addr[5]))
 	case 0x03:
-		domainLen := int(buf[4])
-		targetAddr = fmt.Sprintf("%s:%d",
-			string(buf[5:5+domainLen]),
-			uint16(buf[5+domainLen])<<8|uint16(buf[6+domainLen]))
+		lenByte := make([]byte, 1)
+		if _, err := io.ReadFull(r, lenByte); err != nil {
+			return
+		}
+		rest := make([]byte, int(lenByte[0])+2)
+		if _, err := io.ReadFull(r, rest); err != nil {
+			return
+		}
+		targetAddr = fmt.Sprintf("%s:%d", string(rest[:lenByte[0]]), uint16(rest[lenByte[0]])<<8|uint16(rest[lenByte[0]+1]))
 	default:
+		clientConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) // address type not supported
 		return
 	}
 
@@ -114,7 +132,9 @@ func (s *SOCKS5Server) handleConnection(clientConn net.Conn) {
 	go func() {
 		defer wg.Done()
 		defer targetConn.Close()
-		io.Copy(targetConn, clientConn)
+		// r, not clientConn: any bytes a pipelining client already sent past the CONNECT
+		// request are sitting in r's buffer, not yet visible to a raw Read on clientConn.
+		io.Copy(targetConn, r)
 	}()
 
 	go func() {
