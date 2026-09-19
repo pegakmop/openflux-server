@@ -43,8 +43,6 @@ func TestShouldBypassConnectionByDNSCache(t *testing.T) {
 		t.Errorf("SNI-less connection to a cached, tunneled site must stay tunneled")
 	}
 
-	// Same IP now also answers for an unlisted site - ambiguity must prefer
-	// the tunnel and never set it free.
 	include.dnsCache.record([]dnsARecord{{domain: "other.example", ip: "93.184.216.34", ttl: 300}})
 	if include.shouldBypassConnection(nil, "93.184.216.34:443") {
 		t.Errorf("mixed domains on a shared IP must stay tunneled")
@@ -68,9 +66,6 @@ func TestShouldBypassConnectionUnknownDefaults(t *testing.T) {
 	}
 }
 
-// A tiny stand-in resolver that answers any query with a fixed A record, so
-// the direct-DNS path can be exercised against a local socket instead of a
-// real public resolver.
 type stubResolver struct {
 	conn   *net.UDPConn
 	answer []byte

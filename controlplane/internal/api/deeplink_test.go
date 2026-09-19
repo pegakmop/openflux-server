@@ -21,8 +21,7 @@ func TestBuildDeepLinkRoundTrips(t *testing.T) {
 		t.Fatalf("link = %q, want prefix %q", link, prefix)
 	}
 
-	// Must match the Android app's Base64.URL_SAFE|NO_WRAP|NO_PADDING
-	// exactly (see ProfileDeepLink.kt) - RawURLEncoding is Go's equivalent.
+	// Must match the Android app's Base64.URL_SAFE|NO_WRAP|NO_PADDING exactly - RawURLEncoding is Go's equivalent.
 	data := strings.TrimPrefix(link, prefix)
 	decoded, err := base64.RawURLEncoding.DecodeString(data)
 	if err != nil {

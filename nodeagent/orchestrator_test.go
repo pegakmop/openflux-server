@@ -4,11 +4,7 @@ import "testing"
 
 // --- portAllocator --------------------------------------------------------
 
-// TestPortAllocatorRangesNeverOverlap guards the actual production bug this
-// allocator exists to prevent: two keys' gvisor stacks independently
-// choosing the same source port and cross-delivering each other's traffic
-// (see TCPTunnel.SetPortRange's doc comment). Every concurrently-held range
-// must be disjoint from every other one.
+// TestPortAllocatorRangesNeverOverlap guards the actual production bug: two keys' gvisor stacks choosing the same source port and cross-delivering each other's traffic.
 func TestPortAllocatorRangesNeverOverlap(t *testing.T) {
 	var p portAllocator
 
@@ -29,9 +25,6 @@ func TestPortAllocatorRangesNeverOverlap(t *testing.T) {
 	}
 }
 
-// TestPortAllocatorRecyclesReleasedRanges guards against a leak: an
-// allocator that only ever grows would exhaust the port space long before
-// a node's real key churn (keys added and removed over time) should matter.
 func TestPortAllocatorRecyclesReleasedRanges(t *testing.T) {
 	var p portAllocator
 
@@ -52,9 +45,6 @@ func TestPortAllocatorRecyclesReleasedRanges(t *testing.T) {
 	}
 }
 
-// TestPortAllocatorExhaustion guards the failure path: once the port space
-// is used up, alloc must report that cleanly rather than handing out a
-// range past portRangeMax or overlapping one already held.
 func TestPortAllocatorExhaustion(t *testing.T) {
 	var p portAllocator
 

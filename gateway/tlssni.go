@@ -2,12 +2,7 @@ package gateway
 
 import "encoding/binary"
 
-// sniServerName extracts the server_name from a TLS ClientHello prefix.
-// It returns "" when p is too short to hold a complete ClientHello, is not a
-// ClientHello at all, or carries no SNI extension - lookups then fall back to
-// the DNS cache / the mode's default rule. The parser is deliberately
-// defensive: every offset is bounds-checked against the (possibly truncated)
-// buffer, so a malformed or malicious prefix can never panic.
+// sniServerName is deliberately defensive: every offset is bounds-checked so a malformed or malicious prefix can never panic.
 func sniServerName(p []byte) string {
 	if len(p) < 5 {
 		return ""
@@ -86,9 +81,6 @@ func sniServerName(p []byte) string {
 	return ""
 }
 
-// parseSNIExtension walks the server_name extension's list: uint16 total
-// length, then one or more ServerName entries (uint8 type, uint16 length,
-// bytes) of which type 0 is host_name.
 func parseSNIExtension(p []byte) string {
 	if len(p) < 2 {
 		return ""

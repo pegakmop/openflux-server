@@ -6,24 +6,13 @@ import (
 	"strings"
 )
 
-// Minimal DNS wire-format helpers, just enough to learn two things from the
-// queries and replies that already pass through relayDNS:
-//   - the QNAME of a query (to evaluate the site policy on it), and
-//   - which IPv4 addresses a reply maps which names to (to later classify
-//     SNI-less TCP connections by destination IP).
-//
-// This deliberately does not try to be a full DNS implementation - EDNS,
-// DNSSEC, compression edge cases and the rest are passed through untouched;
-// the parser only needs to survive arbitrary input without panicking.
+// Minimal DNS wire-format helpers - just enough to learn QNAME and A-record mappings from traffic already passing through relayDNS; not a full DNS implementation.
 
 // isQuery reports whether the message has the QR bit clear (a query).
 func isDNSQuery(msg []byte) bool {
 	return len(msg) >= 4 && msg[2]&0x80 == 0
 }
 
-// skipDNSName advances past one name at off, honoring compression pointers.
-// Returns the offset just past the name and whether the name was well-formed
-// within bounds.
 func skipDNSName(msg []byte, off int) (int, bool) {
 	for {
 		if off >= len(msg) {
@@ -49,12 +38,6 @@ func skipDNSName(msg []byte, off int) (int, bool) {
 	}
 }
 
-// readDNSName decodes a (possibly compressed) name starting at off into a
-// dotted, lowercased label sequence. The returned offset is where the name
-// field ends in the message itself (the position right after the first
-// compression pointer, or after the terminating zero for an in-place name),
-// so callers can read the record fields that follow. Compression pointers
-// are followed up to a fixed depth to frustrate pointer loops.
 func readDNSName(msg []byte, off int) (string, int, bool) {
 	var labels []string
 	retOff := off
@@ -105,8 +88,6 @@ func readDNSName(msg []byte, off int) (string, int, bool) {
 	}
 }
 
-// dnsQuestionName extracts the QNAME (lowercased, with trailing dot stripped)
-// from a DNS query's first question.
 func dnsQuestionName(msg []byte) (string, bool) {
 	if len(msg) < 12 || !isDNSQuery(msg) {
 		return "", false
@@ -122,8 +103,6 @@ func dnsQuestionName(msg []byte) (string, bool) {
 	return strings.TrimSuffix(name, "."), true
 }
 
-// dnsTypeA = 1 (IPv4), dnsClassIN = 1, dnsMinTTLEntry/dnsMaxTTLEntry bound
-// how long a reverse IP->domain mapping may be remembered.
 const (
 	dnsTypeA       = 1
 	dnsClassIN     = 1
@@ -138,10 +117,6 @@ type dnsARecord struct {
 	ttl    uint32
 }
 
-// dnsARecords walks the answer, authority and additional sections of a DNS
-// reply and returns every A (type 1, class IN) record with its owner name
-// (lowercased) and TTL. The reply is assumed to be a response (validated
-// only loosely - the caller only feeds replies it got from a resolver).
 func dnsARecords(msg []byte) []dnsARecord {
 	if len(msg) < 12 {
 		return nil

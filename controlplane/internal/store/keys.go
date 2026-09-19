@@ -14,13 +14,11 @@ import (
 )
 
 type CreateKeyParams struct {
-	TokenHash string
-	TokenEnc  []byte
-	Label     string
-	Transport string
-	DocURL    string
-	// DocURLs is set instead of DocURL for the yandex_multistream transport
-	// (2+ URLs) - see model.Key.DocURLs.
+	TokenHash         string
+	TokenEnc          []byte
+	Label             string
+	Transport         string
+	DocURL            string
 	DocURLs           []string
 	E2EEncryption     bool
 	TrafficLimitBytes *int64
@@ -42,11 +40,7 @@ const keyColumns = `id, label, transport, doc_url, doc_urls, e2e_encryption, ass
 	traffic_limit_bytes, bytes_sent_total, bytes_received_total, owner_ref,
 	expires_at, created_at, updated_at, last_seen_at`
 
-// CreateKey inserts a new key and best-effort assigns it to the active node
-// currently carrying the fewest enabled keys (so a fleet of exit nodes stays
-// roughly balanced without needing a separate scheduler). If no node has
-// spare capacity the key is left unassigned; an operator can assign one
-// later via UpdateKeyAssignedNode.
+// CreateKey best-effort assigns the new key to whichever active node currently carries the fewest enabled keys, keeping the fleet roughly balanced without a separate scheduler.
 func (s *Store) CreateKey(ctx context.Context, p CreateKeyParams) (model.Key, error) {
 	row := s.pool.QueryRow(ctx, `
 		WITH candidate AS (
@@ -68,7 +62,7 @@ func (s *Store) CreateKey(ctx context.Context, p CreateKeyParams) (model.Key, er
 }
 
 func (s *Store) GetKeyByTokenHash(ctx context.Context, tokenHash string) (model.Key, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+keyColumns+` FROM keys WHERE token_hash = $1`, tokenHash)
+	row := s.pool.QueryRow(ctx, `SELECT `+keyColumns+` FROM keys WHERE token_hash = $1 AND deleted_at IS NULL`, tokenHash)
 	k, err := scanKey(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Key{}, ErrNotFound
@@ -80,7 +74,7 @@ func (s *Store) GetKeyByTokenHash(ctx context.Context, tokenHash string) (model.
 }
 
 func (s *Store) GetKeyByID(ctx context.Context, id string) (model.Key, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+keyColumns+` FROM keys WHERE id = $1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT `+keyColumns+` FROM keys WHERE id = $1 AND deleted_at IS NULL`, id)
 	k, err := scanKey(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Key{}, ErrNotFound
@@ -91,12 +85,7 @@ func (s *Store) GetKeyByID(ctx context.Context, id string) (model.Key, error) {
 	return k, nil
 }
 
-// NodeKey is a key as its assigned exit node sees it - a narrower shape
-// than model.Key because it includes TokenEnc, the encrypted raw token
-// (see auth.TokenCipher) a node needs to derive the same end-to-end
-// encryption key the client did. Keeping this separate from model.Key
-// means nothing else that touches the general key model (the admin API,
-// the web panel) has any path to that field at all.
+// NodeKey is kept separate from model.Key so nothing outside the exit-node path (the admin API, the web panel) has any access to TokenEnc, the encrypted raw token.
 type NodeKey struct {
 	ID                 string
 	DocURL             string
@@ -106,23 +95,14 @@ type NodeKey struct {
 	BytesSentTotal     int64
 	BytesReceivedTotal int64
 	TokenEnc           []byte
-	// E2EEncryption mirrors the key's e2e_encryption column - the exit node
-	// needs this to decide whether to wrap the key's transport in
-	// transport.EncryptedTransport at all (see nodeagent.Orchestrator's
-	// startWorker). Before this field existed, the node had no way to see
-	// this setting and instead guessed per-peer from whatever the client
-	// happened to send, which made the panel's toggle purely advisory - see
-	// transport.EncryptedTransport's doc comment.
-	E2EEncryption bool
+	E2EEncryption      bool
 }
 
-// ListActiveKeysForNode returns the enabled keys currently assigned to a
-// node - this is what the exit node's poll loop consumes.
 func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]NodeKey, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, doc_url, doc_urls, transport, traffic_limit_bytes, bytes_sent_total, bytes_received_total, token_enc, e2e_encryption
 		FROM keys
-		WHERE assigned_node_id = $1 AND enabled = true
+		WHERE assigned_node_id = $1 AND enabled = true AND deleted_at IS NULL
 		ORDER BY created_at
 	`, nodeID)
 	if err != nil {
@@ -156,7 +136,7 @@ func (s *Store) ListKeys(ctx context.Context, f ListKeysFilter) ([]model.Key, er
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+keyColumns+` FROM keys
-		WHERE ($1 = '' OR owner_ref = $1)
+		WHERE ($1 = '' OR owner_ref = $1) AND deleted_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
 	`, f.OwnerRef, limit, f.Offset)
@@ -176,28 +156,15 @@ func (s *Store) ListKeys(ctx context.Context, f ListKeysFilter) ([]model.Key, er
 	return out, rows.Err()
 }
 
-// HasEnabledKeyWithAnyDocURL reports whether some OTHER enabled key already
-// uses any of urls - checked against both doc_url (every non-multistream
-// transport) and doc_urls (yandex_multistream's 2+ URLs), since both
-// represent the same kind of collision. Yandex broadcasts every
-// "cursor"/"saveChanges" event in a document to every participant, sender
-// included - two keys sharing one document means two independent tunnels
-// (or two legs of the same multistream key and someone else's key) sit in
-// the same broadcast room and each one's traffic gets reinjected into the
-// other's, corrupting both. excludeID skips a key checking against itself
-// (e.g. re-enabling itself with unchanged URLs).
+// HasEnabledKeyWithAnyDocURL guards against two enabled keys sharing one Yandex document: Yandex broadcasts every event to every participant, so a shared doc means each key's traffic gets reinjected into the other's.
 func (s *Store) HasEnabledKeyWithAnyDocURL(ctx context.Context, urls []string, excludeID string) (bool, error) {
 	var exists bool
-	// excludeID is "" on creation (there's no id yet) - id is uuid, and
-	// casting "" to uuid errors outright ("invalid input syntax for type
-	// uuid"), which used to surface here as "check doc_url failed" on every
-	// single key creation. $2 = '' short-circuits before the ::uuid cast
-	// ever runs, the same idiom ListKeys already uses above for its own
-	// optional owner_ref filter.
+	// excludeID is "" on creation; $2='' short-circuits before the ::uuid cast, which otherwise errors outright on an empty string ("invalid input syntax for type uuid").
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM keys
 			WHERE enabled = true
+				AND deleted_at IS NULL
 				AND ($2 = '' OR id != $2::uuid)
 				AND (doc_url = ANY($1::text[]) OR doc_urls && $1::text[])
 		)
@@ -208,17 +175,10 @@ func (s *Store) HasEnabledKeyWithAnyDocURL(ctx context.Context, urls []string, e
 	return exists, nil
 }
 
-// ErrDocURLInUse is returned by the *Guarded key operations below when
-// another enabled key already claims one of the given doc URLs - the same
-// condition HasEnabledKeyWithAnyDocURL reports, just discovered inside the
-// same transaction that performs the write, so it can't lose a race against
-// a concurrent request checking the same URLs (see CreateKeyGuarded).
+// ErrDocURLInUse is returned when another enabled key already claims a doc URL, discovered inside the same transaction as the write so it can't lose a race against a concurrent check.
 var ErrDocURLInUse = errors.New("doc_url already in use by another enabled key")
 
-// docURLLockKeys returns a deduplicated, sorted set of Postgres
-// advisory-lock keys, one per URL - sorted so two calls whose URL sets
-// overlap always acquire their shared locks in the same order and can
-// never deadlock waiting on each other.
+// docURLLockKeys sorts URLs so two calls with overlapping sets always acquire their shared locks in the same order and can never deadlock waiting on each other.
 func docURLLockKeys(urls []string) []int64 {
 	seen := make(map[int64]bool, len(urls))
 	keys := make([]int64, 0, len(urls))
@@ -235,12 +195,7 @@ func docURLLockKeys(urls []string) []int64 {
 	return keys
 }
 
-// lockDocURLs holds a transaction-scoped Postgres advisory lock on every URL
-// in urls, released automatically when tx commits or rolls back. This is
-// what actually closes the check-then-write race HasEnabledKeyWithAnyDocURL
-// alone can't: two concurrent requests touching overlapping URL sets now
-// serialize here before either reaches its own EXISTS check, so the second
-// one always sees the first's write.
+// lockDocURLs closes the check-then-write race: two concurrent requests touching overlapping URL sets serialize here before either reaches its EXISTS check.
 func lockDocURLs(ctx context.Context, tx pgx.Tx, urls []string) error {
 	for _, key := range docURLLockKeys(urls) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, key); err != nil {
@@ -250,15 +205,13 @@ func lockDocURLs(ctx context.Context, tx pgx.Tx, urls []string) error {
 	return nil
 }
 
-// docURLInUseTx is HasEnabledKeyWithAnyDocURL run against an existing
-// transaction instead of the pool, so it observes writes made by that same
-// transaction.
 func docURLInUseTx(ctx context.Context, tx pgx.Tx, urls []string, excludeID string) (bool, error) {
 	var exists bool
 	err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM keys
 			WHERE enabled = true
+				AND deleted_at IS NULL
 				AND ($2 = '' OR id != $2::uuid)
 				AND (doc_url = ANY($1::text[]) OR doc_urls && $1::text[])
 		)
@@ -269,13 +222,7 @@ func docURLInUseTx(ctx context.Context, tx pgx.Tx, urls []string, excludeID stri
 	return exists, nil
 }
 
-// CreateKeyGuarded is CreateKey, but the doc_url uniqueness check and the
-// insert happen inside one transaction holding an advisory lock on every URL
-// in urls for its duration - see lockDocURLs. Without this, two concurrent
-// creates for keys sharing a doc_url could both pass
-// HasEnabledKeyWithAnyDocURL before either committed, landing two enabled
-// keys in the same Yandex Docs broadcast room. Returns ErrDocURLInUse
-// instead of creating the key if the check fails.
+// CreateKeyGuarded holds an advisory lock across the doc_url check and insert in one transaction, since two concurrent creates could otherwise both pass the check before either committed.
 func (s *Store) CreateKeyGuarded(ctx context.Context, p CreateKeyParams, urls []string) (model.Key, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -321,10 +268,6 @@ func (s *Store) CreateKeyGuarded(ctx context.Context, p CreateKeyParams, urls []
 	return k, nil
 }
 
-// SetKeyEnabledGuarded is SetKeyEnabled(ctx, id, true), but the doc_url
-// uniqueness check and the update happen inside one transaction holding an
-// advisory lock on every URL in urls - see CreateKeyGuarded's doc comment
-// for why the plain check-then-update in handleSetKeyEnabled needs this.
 func (s *Store) SetKeyEnabledGuarded(ctx context.Context, id string, urls []string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -344,7 +287,7 @@ func (s *Store) SetKeyEnabledGuarded(ctx context.Context, id string, urls []stri
 		return ErrDocURLInUse
 	}
 
-	tag, err := tx.Exec(ctx, `UPDATE keys SET enabled = true, updated_at = now() WHERE id = $1`, id)
+	tag, err := tx.Exec(ctx, `UPDATE keys SET enabled = true, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("set key enabled: %w", err)
 	}
@@ -356,7 +299,7 @@ func (s *Store) SetKeyEnabledGuarded(ctx context.Context, id string, urls []stri
 }
 
 func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE keys SET enabled = $1, updated_at = now() WHERE id = $2`, enabled, id)
+	tag, err := s.pool.Exec(ctx, `UPDATE keys SET enabled = $1, updated_at = now() WHERE id = $2 AND deleted_at IS NULL`, enabled, id)
 	if err != nil {
 		return fmt.Errorf("set key enabled: %w", err)
 	}
@@ -366,13 +309,9 @@ func (s *Store) SetKeyEnabled(ctx context.Context, id string, enabled bool) erro
 	return nil
 }
 
-// RotateKeyToken invalidates a key's current token and issues a new one,
-// leaving every other field (label, doc_url, traffic limit, owner_ref,
-// usage stats) untouched - for when the raw token from creation is gone
-// (it's only ever stored hashed) but the key itself should keep working.
 func (s *Store) RotateKeyToken(ctx context.Context, id, newTokenHash string, newTokenEnc []byte) (model.Key, error) {
 	row := s.pool.QueryRow(ctx, `
-		UPDATE keys SET token_hash = $1, token_enc = $2, updated_at = now() WHERE id = $3
+		UPDATE keys SET token_hash = $1, token_enc = $2, updated_at = now() WHERE id = $3 AND deleted_at IS NULL
 		RETURNING `+keyColumns, newTokenHash, newTokenEnc, id)
 	k, err := scanKey(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -385,7 +324,7 @@ func (s *Store) RotateKeyToken(ctx context.Context, id, newTokenHash string, new
 }
 
 func (s *Store) SetKeyTrafficLimit(ctx context.Context, id string, limit *int64) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE keys SET traffic_limit_bytes = $1, updated_at = now() WHERE id = $2`, limit, id)
+	tag, err := s.pool.Exec(ctx, `UPDATE keys SET traffic_limit_bytes = $1, updated_at = now() WHERE id = $2 AND deleted_at IS NULL`, limit, id)
 	if err != nil {
 		return fmt.Errorf("set key traffic limit: %w", err)
 	}
@@ -395,8 +334,9 @@ func (s *Store) SetKeyTrafficLimit(ctx context.Context, id string, limit *int64)
 	return nil
 }
 
+// DeleteKey soft-deletes: the row (and its lifetime usage totals) stays for the panel's charts, since every other Store method already treats deleted_at IS NOT NULL as "doesn't exist".
 func (s *Store) DeleteKey(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM keys WHERE id = $1`, id)
+	tag, err := s.pool.Exec(ctx, `UPDATE keys SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("delete key: %w", err)
 	}

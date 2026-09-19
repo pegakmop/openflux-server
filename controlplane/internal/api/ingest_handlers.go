@@ -9,14 +9,10 @@ import (
 )
 
 type createKeyRequest struct {
-	Label     string `json:"label"`
-	Transport string `json:"transport"`
-	DocURL    string `json:"doc_url"`
-	// DocURLs is required instead of DocURL when Transport is
-	// "yandex_multistream" (2+ URLs) - see model.Key.DocURLs.
-	DocURLs []string `json:"doc_urls"`
-	// E2EEncryption is the operator's default for the app's optional
-	// payload encryption - see model.Key.E2EEncryption.
+	Label             string     `json:"label"`
+	Transport         string     `json:"transport"`
+	DocURL            string     `json:"doc_url"`
+	DocURLs           []string   `json:"doc_urls"`
 	E2EEncryption     bool       `json:"e2e_encryption"`
 	TrafficLimitBytes *int64     `json:"traffic_limit_bytes"`
 	OwnerRef          string     `json:"owner_ref"`
@@ -31,9 +27,6 @@ type createdKey struct {
 	DeepLink string `json:"deep_link,omitempty"`
 }
 
-// createKeyHandler is shared by the admin key-creation endpoint and the
-// third-party ingestion endpoint. It accepts either a single object or an
-// array for bulk import.
 func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwnerRef string) {
 	var reqs []createKeyRequest
 
@@ -69,11 +62,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 		return
 	}
 
-	// Tracks every URL (doc_url, or every entry of doc_urls) claimed earlier
-	// in this same batch, since HasEnabledKeyWithAnyDocURL only sees keys
-	// already committed to the database - two entries in one bulk-import
-	// request sharing a URL would otherwise both pass that check before
-	// either is inserted.
+	// Tracks every URL claimed earlier in this batch, since HasEnabledKeyWithAnyDocURL only sees keys already committed - two entries in one bulk import sharing a URL would otherwise both pass the check.
 	urlsInBatch := make(map[string]bool, len(reqs))
 
 	created := make([]createdKey, 0, len(reqs))
@@ -99,16 +88,7 @@ func createKeyHandler(a *App, w http.ResponseWriter, r *http.Request, forcedOwne
 			req.DocURLs = nil
 		}
 
-		// Two enabled keys sharing one Yandex Docs document sit in the same
-		// broadcast room - see HasEnabledKeyWithAnyDocURL's doc comment -
-		// and a new key is enabled immediately (enabled defaults to true),
-		// so this has to be checked at creation time, not just when
-		// re-enabling one.
-		// A per-entry set catches a duplicate URL repeated within this one
-		// entry's own doc_urls too, not just a collision against an earlier
-		// entry in the batch - urlsInBatch alone only gets populated after
-		// this loop, so two identical URLs inside the same doc_urls list
-		// would otherwise never collide with each other.
+		// A new key is enabled immediately, so the doc_url collision check runs at creation time too, and a per-entry set catches a URL duplicated within one entry's own doc_urls list.
 		urlSet := make(map[string]bool, len(urls))
 		for _, u := range urls {
 			if urlsInBatch[u] || urlSet[u] {

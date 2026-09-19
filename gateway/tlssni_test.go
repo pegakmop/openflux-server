@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// buildClientHello assembles a minimal TLS 1.3 ClientHello with an optional
-// SNI extension so tests can exercise sniServerName against real framing.
 func buildClientHello(sni string, withSNI bool) []byte {
 	var hello []byte
 	hello = append(hello, 0x03, 0x03) // legacy_version
@@ -54,9 +52,6 @@ func TestSNIWithoutExtension(t *testing.T) {
 
 func TestSNITruncatedPrefix(t *testing.T) {
 	hello := buildClientHello("www.example.com", true)
-	// Every strict prefix shorter than the full record must parse without a
-	// panic and either find the SNI (when it happens to be complete enough)
-	// or report none.
 	for cut := 0; cut < len(hello); cut++ {
 		func() {
 			defer func() {
@@ -67,8 +62,6 @@ func TestSNITruncatedPrefix(t *testing.T) {
 			_ = sniServerName(hello[:cut])
 		}()
 	}
-	// The SNI lives early in the hello, so a prefix that includes it should
-	// still be parseable even without the record's full handshake length.
 	prefix := hello[:40]
 	if got := sniServerName(prefix); got != "" {
 		t.Logf("long prefix resolved to %q (substrings may vary)", got)
@@ -90,8 +83,6 @@ func TestSNINotClientHello(t *testing.T) {
 }
 
 func TestSNIWithExtraExtensions(t *testing.T) {
-	// The SNI extension need not be first; the parser must skip a preceding
-	// extension. Build a hello with a supported_versions extension first.
 	var hello []byte
 	hello = append(hello, 0x03, 0x03)
 	hello = append(hello, make([]byte, 32)...)

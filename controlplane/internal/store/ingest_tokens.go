@@ -38,9 +38,6 @@ func (s *Store) GetIngestTokenByHash(ctx context.Context, tokenHash string) (mod
 	return t, nil
 }
 
-// ListIngestTokens returns every ingest token (enabled or not) so an admin
-// can review what's been issued and revoke one that's leaked or retired -
-// nothing else in this package could previously do that.
 func (s *Store) ListIngestTokens(ctx context.Context) ([]model.IngestToken, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, label, scope, enabled, created_at

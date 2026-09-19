@@ -13,8 +13,6 @@ import (
 	"strings"
 )
 
-// GenerateToken returns a fresh high-entropy opaque token. Callers must
-// store only Hash(token), never the raw value.
 func GenerateToken(prefix string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -27,10 +25,7 @@ func GenerateToken(prefix string) (string, error) {
 	return encoded, nil
 }
 
-// Hasher derives a deterministic, indexable digest of a token. Tokens are
-// already high-entropy random values (not user-chosen passwords), so a
-// peppered SHA-256 is appropriate here and keeps validation O(1) at high
-// request volume instead of requiring slow password hashing.
+// Tokens are already high-entropy random values, not user-chosen passwords, so a peppered SHA-256 is appropriate and keeps validation O(1) instead of requiring slow password hashing.
 type Hasher struct {
 	pepper []byte
 }
@@ -44,12 +39,7 @@ func (h Hasher) Hash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TokenCipher reversibly encrypts a key's raw token so it can be handed back
-// to that key's assigned exit node later (for end-to-end payload
-// encryption - see transport.EncryptedTransport) without storing the token
-// itself in the clear. Domain-separated from Hasher's pepper use via SHA-256
-// so the two derived secrets don't collide even though both start from the
-// same pepper.
+// TokenCipher is domain-separated from Hasher's pepper use via SHA-256 so the two derived secrets never collide despite sharing the same pepper.
 type TokenCipher struct {
 	gcm cipher.AEAD
 }
@@ -101,8 +91,6 @@ func ExtractBearer(r *http.Request) (string, bool) {
 	return token, true
 }
 
-// ConstantTimeEqual compares two strings without leaking timing information
-// about where they first differ.
 func ConstantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

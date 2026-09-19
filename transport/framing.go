@@ -7,19 +7,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Wire format for a batched frame (one covert-channel message can now carry
-// many tunnel packets):
-//
-//	[0]   version byte (batchFormatVersion)
-//	[1]   flags (bit0 = payload is zstd-compressed)
-//	[2:]  payload: a sequence of [2-byte big-endian length][packet] records,
-//	      optionally zstd-compressed as a whole.
-//
-// Ported from upstream p1neappleXpress/OpenFlux (transport/framing.go) - see
-// BatchedTransport's doc comment for why this is opt-in here rather than the
-// default: Yandex/Volga already batch internally (see yandex.go's own
-// batchMarker), so this is mainly a win for transports (MAX/oneme) that
-// don't.
+// Wire format for a batched frame: [0]version [1]flags(bit0=zstd) [2:]sequence of [2-byte length][packet] records, optionally zstd-compressed as a whole.
 const (
 	batchFormatVersion = 0x02
 	batchFlagZstd      = 0x01
@@ -32,9 +20,6 @@ var (
 
 func init() {
 	var err error
-	// SpeedDefault (~level 3): far better ratio than LZ4 at a CPU cost that
-	// is irrelevant next to a covert channel's own latency. Single-shot
-	// EncodeAll/DecodeAll are safe for concurrent use on a shared instance.
 	zstdEnc, err = zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
 		zstd.WithEncoderConcurrency(1),
@@ -44,8 +29,6 @@ func init() {
 	}
 	zstdDec, err = zstd.NewReader(nil,
 		zstd.WithDecoderConcurrency(1),
-		// Bound the damage from a malformed/hostile frame injected into the
-		// shared channel: cap decompressed memory.
 		zstd.WithDecoderMaxMemory(8<<20),
 	)
 	if err != nil {
@@ -69,11 +52,6 @@ func frameBatch(pkts [][]byte) []byte {
 	return out
 }
 
-// EncodeBatch serializes packets into a single wire frame, compressing the
-// whole batch with zstd only when that actually shrinks it. Exported so
-// transport/yandex can reuse this exact, already-tested format for its own
-// capability-negotiated whole-batch compression (see yandex.go's
-// kaZstdBatchCapabilityToken) instead of re-implementing it.
 func EncodeBatch(pkts [][]byte) []byte {
 	framed := frameBatch(pkts)
 	compressed := zstdEnc.EncodeAll(framed, nil)

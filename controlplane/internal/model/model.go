@@ -9,27 +9,15 @@ type Node struct {
 	Status          string
 	LastHeartbeatAt *time.Time
 	CreatedAt       time.Time
-	// ActiveKeys is the number of enabled keys currently assigned to this
-	// node. It's computed on read (ListNodes) rather than stored, so it can
-	// never drift from the actual assignment state.
-	ActiveKeys int
+	ActiveKeys      int
 }
 
 type Key struct {
-	ID        string
-	Label     string
-	Transport string
-	DocURL    string
-	// DocURLs is the yandex_multistream transport's 2+ independent Yandex
-	// Docs URLs (see transport.MultiStreamTransport); empty for every other
-	// transport, which keeps using DocURL instead.
-	DocURLs []string
-	// E2EEncryption is the operator's preference for whether a client
-	// should turn on transport.EncryptedTransport for this key - see
-	// migration 0004_key_e2e_encryption.sql. Doesn't change how an exit
-	// node behaves (it auto-detects either way); this is what /v1/resolve
-	// and the deep link hand the app as the default for a freshly imported
-	// profile.
+	ID                 string
+	Label              string
+	Transport          string
+	DocURL             string
+	DocURLs            []string
 	E2EEncryption      bool
 	AssignedNodeID     *string
 	Enabled            bool
@@ -47,8 +35,6 @@ func (k Key) BytesUsedTotal() int64 {
 	return k.BytesSentTotal + k.BytesReceivedTotal
 }
 
-// Status reports the client-facing state of a key, folding in traffic-limit
-// and expiry checks that "enabled" alone doesn't capture.
 func (k Key) Status(now time.Time) string {
 	if !k.Enabled {
 		return "disabled"

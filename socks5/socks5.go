@@ -25,11 +25,6 @@ func NewSOCKS5Server(addr string, dialer Dialer) *SOCKS5Server {
 	return &SOCKS5Server{listenAddr: addr, dialer: dialer}
 }
 
-// Start listens and serves connections until Stop is called (or listening
-// itself fails). Blocks the calling goroutine - the desktop CLI runs this as
-// its main loop; a caller that needs to keep running other code (e.g. the
-// mobile package, so it can expose a Stop button) should call this in its
-// own goroutine.
 func (s *SOCKS5Server) Start() error {
 	listener, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
@@ -45,10 +40,7 @@ func (s *SOCKS5Server) Start() error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			// Stop() closing the listener surfaces here as an Accept error
-			// too - tell that apart from a transient real one so a
-			// deliberate shutdown returns cleanly instead of logging into a
-			// tight loop forever.
+			// Stop() closing the listener surfaces as an Accept error too; tell that apart from a transient one so a deliberate shutdown returns cleanly instead of logging in a tight loop.
 			s.mu.Lock()
 			stopped := s.listener == nil
 			s.mu.Unlock()
@@ -62,8 +54,6 @@ func (s *SOCKS5Server) Start() error {
 	}
 }
 
-// Stop closes the listener, unblocking Start's Accept loop so it returns.
-// Safe to call before Start, or more than once.
 func (s *SOCKS5Server) Stop() error {
 	s.mu.Lock()
 	l := s.listener

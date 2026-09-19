@@ -4,9 +4,7 @@ import { auth } from './state/auth.svelte';
 
 // ---- API wire models ----------------------------------------------------
 
-// Note: list endpoints serialize the Go structs with their Go field names
-// (capitalized). Create endpoints and the new stats endpoints use lowercase
-// snake_case. The panel maps both here.
+// Note: list endpoints use the Go structs' capitalized field names; create/stats endpoints use lowercase snake_case.
 
 export interface NodeDTO {
 	ID: string;

@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// dnsUpstreamKind selects how queryUpstream actually talks to dnsUpstream -
-// see parseDNSUpstream for the three accepted forms.
 type dnsUpstreamKind int
 
 const (
@@ -22,8 +20,6 @@ const (
 	dnsUpstreamDoH                          // DNS-over-HTTPS, RFC 8484 (wireformat)
 )
 
-// dnsUpstreamConfig is dnsUpstream, parsed once at construction so relayDNS
-// doesn't re-parse it on every query.
 type dnsUpstreamConfig struct {
 	kind dnsUpstreamKind
 	addr string // host:port to dial via Server.dialer.DialTCP
@@ -31,26 +27,7 @@ type dnsUpstreamConfig struct {
 	path string // HTTP request path (DoH only)
 }
 
-// parseDNSUpstream turns the user-supplied dnsUpstream string into a
-// resolved config. Three forms are accepted, on both the client and the
-// exit node (the same Server code runs as either) - a query through
-// whichever of these ends up doing the actual dial rides the covert
-// channel like everything else, so this only ever adds protocol privacy
-// for the DNS exchange itself, not a way around the tunnel:
-//
-//   - "host" or "host:port" (default port 53): classic DNS-over-TCP -
-//     unchanged from before this existed.
-//   - "tls://host" or "tls://host:port" (default port 853): DNS-over-TLS.
-//     Reuses writeDNSOverTCP/readDNSOverTCP as-is - RFC 7858 specifies the
-//     exact same 2-byte length-prefixed framing as plain DNS-over-TCP,
-//     just inside a TLS session.
-//   - "https://host[:port][/path]" (default port 443, default path
-//     /dns-query): DNS-over-HTTPS, the wireformat variant (a raw DNS
-//     message as the POST body/response, not the JSON one).
-//
-// An https:// value that fails to parse as a URL at all falls back to
-// dnsUpstreamPlain with the raw string as-is - dialing it will simply fail
-// with a clear error rather than silently misinterpreting a typo.
+// parseDNSUpstream accepts host[:port], tls://... (DoT), or https://... (DoH, wireformat) - the DNS exchange itself gains privacy, but still rides through the tunnel like everything else.
 func parseDNSUpstream(raw string) dnsUpstreamConfig {
 	if raw == "" {
 		raw = "77.88.8.8:53"
@@ -91,9 +68,6 @@ func parseDNSUpstream(raw string) dnsUpstreamConfig {
 	}
 }
 
-// queryUpstream resolves query against s.dnsUpstreamCfg, dialing out through
-// s.dialer either way (see parseDNSUpstream's doc comment on why DoT/DoH
-// here is a privacy upgrade for the DNS exchange, not a tunnel bypass).
 func (s *Server) queryUpstream(query []byte) ([]byte, error) {
 	switch s.dnsUpstreamCfg.kind {
 	case dnsUpstreamDoT:
@@ -119,9 +93,6 @@ func (s *Server) queryPlainDNS(query []byte) ([]byte, error) {
 	return readDNSOverTCP(conn)
 }
 
-// dialUpstreamTLS dials dnsUpstreamCfg.addr and performs the TLS handshake -
-// shared by DoT and DoH, which differ only in what goes over the connection
-// afterward.
 func (s *Server) dialUpstreamTLS() (*tls.Conn, error) {
 	raw, err := s.dialer.DialTCP(s.dnsUpstreamCfg.addr)
 	if err != nil {
@@ -150,12 +121,6 @@ func (s *Server) queryDoT(query []byte) ([]byte, error) {
 	return readDNSOverTCP(conn)
 }
 
-// queryDoH speaks RFC 8484's wireformat over a single, one-shot HTTP/1.1
-// request - not a general HTTP client (no redirects, no connection reuse,
-// no chunked-request handling), which this exchange has no use for: one
-// query, one response, one connection, matching the existing plain-DNS and
-// DoT paths' shape. http.ReadResponse parses the reply so this isn't
-// hand-rolling HTTP framing itself, just the request line.
 func (s *Server) queryDoH(query []byte) ([]byte, error) {
 	if len(query) > maxDNSMessageSize {
 		return nil, fmt.Errorf("dns message too large: %d bytes", len(query))

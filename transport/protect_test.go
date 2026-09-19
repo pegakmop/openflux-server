@@ -52,12 +52,7 @@ func TestProtectedDialerFailsWhenProtectorRejects(t *testing.T) {
 	}
 }
 
-// TestProtectedResolverIgnoresRequestedAddress guards the actual Android bug:
-// Go's resolver asks Dial to connect to whatever nameserver it thinks it
-// found (127.0.0.1:53 on Android, since there's no /etc/resolv.conf to read
-// - see ProtectedResolver's doc comment), and nothing listens there. If this
-// regresses to actually dialing the requested address, this test hangs/errors
-// instead of connecting to the fake bootstrap server.
+// TestProtectedResolverIgnoresRequestedAddress guards the actual Android bug: Go's resolver asks Dial to connect to 127.0.0.1:53, where nothing listens.
 func TestProtectedResolverIgnoresRequestedAddress(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,8 +74,6 @@ func TestProtectedResolverIgnoresRequestedAddress(t *testing.T) {
 		conn.Close()
 	}()
 
-	// A nameserver address nothing is listening on - simulates Android's
-	// broken defaultNS fallback. The resolver must not actually use it.
 	conn, err := ProtectedResolver().Dial(context.Background(), "tcp", "127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -94,10 +87,6 @@ func TestProtectedResolverIgnoresRequestedAddress(t *testing.T) {
 	}
 }
 
-// TestSetBootstrapDNSServersReplacesNotAppends guards the documented
-// "force, don't fall back" behavior: a caller supplying their own resolver
-// already knows the defaults don't work for them, so they must not still be
-// tried.
 func TestSetBootstrapDNSServersReplacesNotAppends(t *testing.T) {
 	t.Cleanup(func() { SetBootstrapDNSServers(nil) })
 
@@ -108,9 +97,6 @@ func TestSetBootstrapDNSServersReplacesNotAppends(t *testing.T) {
 	}
 }
 
-// TestSetBootstrapDNSServersAppendsDefaultPort mirrors the same host:port
-// normalization every other DNS-address input in this codebase gets - a
-// bare IP typed into a profile setting shouldn't need ":53" spelled out.
 func TestSetBootstrapDNSServersAppendsDefaultPort(t *testing.T) {
 	t.Cleanup(func() { SetBootstrapDNSServers(nil) })
 
@@ -121,9 +107,6 @@ func TestSetBootstrapDNSServersAppendsDefaultPort(t *testing.T) {
 	}
 }
 
-// TestSetBootstrapDNSServersEmptyRestoresDefaults guards StopTunnel's own
-// cleanup call: a profile that forced a resolver must not leak that choice
-// into the next profile's session.
 func TestSetBootstrapDNSServersEmptyRestoresDefaults(t *testing.T) {
 	SetBootstrapDNSServers([]string{"192.0.2.1:53"})
 	SetBootstrapDNSServers(nil)

@@ -19,7 +19,8 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
 
-	poolCfg.MaxConns = 20
+	// Postgres's own max_connections defaults to 100; 40 leaves headroom for Postgres's reserved connections and manual psql sessions while giving fleet-scale usage-report traffic more room than the previous 20.
+	poolCfg.MaxConns = 40
 	poolCfg.MinConns = 2
 	poolCfg.MaxConnLifetime = time.Hour
 	poolCfg.MaxConnIdleTime = 10 * time.Minute
@@ -37,9 +38,6 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// Migrate applies every embedded .sql file in lexical order, tracking what
-// has already run in a schema_migrations table so it is safe to call on
-// every startup.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		filename text PRIMARY KEY,

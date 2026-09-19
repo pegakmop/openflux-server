@@ -21,10 +21,6 @@ func TestDecodeBatchMultipleFrames(t *testing.T) {
 }
 
 func TestDecodeBatchTruncatedFrameStopsCleanly(t *testing.T) {
-	// A length prefix claiming more bytes than are actually present: the
-	// loop must stop (not read out of bounds) rather than treat it as a
-	// valid frame. What's left over falls back to one raw packet, same as
-	// any other leftover tail - not silently dropped.
 	data := []byte{0, 10, 'a', 'b'}
 	got := decodeBatch(data)
 	if len(got) != 1 || string(got[0]) != "ab" {
@@ -33,8 +29,6 @@ func TestDecodeBatchTruncatedFrameStopsCleanly(t *testing.T) {
 }
 
 func TestDecodeBatchZeroLengthFrameStopsCleanly(t *testing.T) {
-	// relayClient never emits a zero-length frame, but a malformed/foreign
-	// payload might - must terminate rather than spin.
 	data := []byte{0, 0}
 	if got := decodeBatch(data); len(got) != 0 {
 		t.Errorf("decodeBatch(zero-length frame, nothing after) = %q, want none", got)
@@ -48,8 +42,6 @@ func TestDecodeBatchEmptyInput(t *testing.T) {
 }
 
 func TestDecodeBatchFallsBackToRawOnUnframedInput(t *testing.T) {
-	// A single byte is too short to be a length prefix - decodeBatch treats
-	// leftover bytes it can't frame as one raw packet rather than dropping them.
 	got := decodeBatch([]byte{0x42})
 	if len(got) != 1 || got[0][0] != 0x42 {
 		t.Fatalf("decodeBatch(1 byte) = %v, want a single raw packet", got)
@@ -75,9 +67,6 @@ func TestBase64EncodeRoundTrips(t *testing.T) {
 }
 
 func TestBase64EncodeConcurrentCallsDontCorrupt(t *testing.T) {
-	// Exercises the sync.Pool reuse path under concurrency - a buffer
-	// handed back to the pool must never be visible in another goroutine's
-	// still-in-flight result string.
 	const n = 50
 	done := make(chan bool, n)
 	for i := 0; i < n; i++ {

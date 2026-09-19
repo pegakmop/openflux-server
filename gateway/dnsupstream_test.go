@@ -14,10 +14,6 @@ import (
 	"time"
 )
 
-// generateSelfSignedCert builds a throwaway self-signed cert/key pair for a
-// local TLS test server - queryDoT/queryDoH's tests pair this with
-// InsecureSkipVerify on the client side rather than needing a cert the
-// system trust store would actually recognize.
 func generateSelfSignedCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -75,10 +71,6 @@ func TestParseDNSUpstream(t *testing.T) {
 	}
 }
 
-// tcpDialerToAddr is a Dialer whose DialTCP ignores the address it's given
-// and always connects to a fixed local test server instead - dnsUpstreamCfg
-// already carries the real address separately, this just stands in for
-// "the covert channel got us there".
 type tcpDialerToAddr struct{ addr string }
 
 func (d tcpDialerToAddr) DialTCP(string) (net.Conn, error) { return net.Dial("tcp", d.addr) }
@@ -92,9 +84,6 @@ func selfSignedTLSConfig(t *testing.T) *tls.Config {
 	return &tls.Config{Certificates: []tls.Certificate{cert}}
 }
 
-// TestQueryDoTRoundTrip guards the actual point of DoT support: the exact
-// same length-prefixed framing as plain DNS-over-TCP, just inside a TLS
-// session - a local TLS listener stands in for a real DoT resolver.
 func TestQueryDoTRoundTrip(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", selfSignedTLSConfig(t))
 	if err != nil {
@@ -137,8 +126,6 @@ func TestQueryDoTRoundTrip(t *testing.T) {
 	}
 }
 
-// TestQueryDoHRoundTrip guards the RFC 8484 wireformat exchange: a raw DNS
-// message as the POST body, the raw reply as the response body.
 func TestQueryDoHRoundTrip(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", selfSignedTLSConfig(t))
 	if err != nil {
@@ -185,9 +172,6 @@ func TestQueryDoHRoundTrip(t *testing.T) {
 	}
 }
 
-// TestQueryDoHRejectsNonOKStatus guards against silently treating an error
-// page (a captive portal, a resolver returning 4xx/5xx) as if it were a
-// valid DNS reply.
 func TestQueryDoHRejectsNonOKStatus(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", selfSignedTLSConfig(t))
 	if err != nil {

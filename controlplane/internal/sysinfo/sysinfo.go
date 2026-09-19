@@ -1,10 +1,4 @@
-// Package sysinfo reads basic host metrics straight from Linux /proc and
-// syscall-level statfs - deliberately dependency-free, because the only
-// other Go dependency in this module is the Postgres driver and adding
-// gopsutil for three numbers isn't worth it. Everything here is Linux-only
-// (the controlplane is deployed on Debian/Ubuntu VPSes); on any other OS
-// the read functions return zero values instead of erroring out, so the
-// panel just shows "—" rather than failing.
+// Package sysinfo reads host metrics straight from Linux /proc, deliberately dependency-free; on any other OS the read functions return zero values instead of erroring.
 package sysinfo
 
 import (
@@ -33,10 +27,6 @@ type Sample struct {
 	ProcessCPU float64 `json:"process_cpu_percent"`
 }
 
-// Collect gathers a metrics snapshot. CPU percent is computed from two
-// /proc/stat reads separated by interval (a single read can't express "%
-// busy"), and process CPU from two /proc/self/stat reads over the same
-// window.
 func Collect(interval time.Duration) Sample {
 	s := Sample{
 		Hostname: hostname(),
@@ -115,8 +105,6 @@ func readMeminfo() (total, used, swapTotal, swapUsed uint64) {
 	return calcMem(data)
 }
 
-// calcMem turns /proc/meminfo bytes into the memory numbers. Split out of
-// readMeminfo so tests can feed it synthetic samples.
 func calcMem(data []byte) (total, used, swapTotal, swapUsed uint64) {
 	if len(data) == 0 {
 		return 0, 0, 0, 0
@@ -145,8 +133,6 @@ func calcMem(data []byte) (total, used, swapTotal, swapUsed uint64) {
 	return total, used, swapTotal, swapUsed
 }
 
-// readCPUTimes parses the aggregated `cpu ` line of /proc/stat into
-// (idle, total) jiffies.
 func readCPUTimes() (idle, total uint64) {
 	data, err := os.ReadFile("/proc/stat")
 	if err != nil {
@@ -185,15 +171,12 @@ func cpuPercent(interval time.Duration) float64 {
 	return 100 * (1 - float64(dIdle)/float64(dTotal))
 }
 
-// readSelfStat parses /proc/self/stat: field 14 (utime) and 15 (stime) are
-// the process's CPU jiffies.
 func readSelfStat() (ticks, start uint64) {
 	data, err := os.ReadFile("/proc/self/stat")
 	if err != nil {
 		return 0, 0
 	}
-	// The comm field (field 2) can contain spaces and parens, so split on
-	// the LAST ')' instead of whitespace.
+	// The comm field (field 2) can contain spaces and parens, so split on the LAST ')' instead of whitespace.
 	rest := string(data)
 	if idx := strings.LastIndex(rest, ")"); idx >= 0 {
 		rest = rest[idx+2:] // skip ") " separator
@@ -217,8 +200,7 @@ func processCPUPercent(interval time.Duration) float64 {
 	time.Sleep(interval)
 	ticks2, _ := readSelfStat()
 	dTicks := ticks2 - ticks1
-	// 100 system clock ticks per second; scale to a *single-core* percent
-	// so >100% is impossible to confuse with >all-cores usage.
+	// 100 system clock ticks per second; scale to a single-core percent so >100% is impossible to confuse with >all-cores usage.
 	coreSeconds := interval.Seconds() * 100 * float64(cpus)
 	if coreSeconds == 0 {
 		return 0

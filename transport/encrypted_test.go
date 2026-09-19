@@ -2,9 +2,6 @@ package transport
 
 import "testing"
 
-// pipeTransport is an in-memory Transport whose Send delivers straight to
-// whatever callback the other end's Receive registered - just enough to
-// test EncryptedTransport's Send/Receive without a real network.
 type pipeTransport struct {
 	Transport
 	peer *pipeTransport
@@ -73,9 +70,6 @@ func TestEncryptedTransportManyPacketsInOrder(t *testing.T) {
 	}
 }
 
-// Both sides are strict now - a wrong token (or any other failure to
-// decrypt) just drops the packet, on either end, rather than falling back to
-// anything.
 func TestEncryptedTransportWrongTokenFailsToDecrypt(t *testing.T) {
 	rawA, rawB := newPipe()
 	node := NewEncryptedTransport(rawA, "token-one", true)
@@ -90,14 +84,7 @@ func TestEncryptedTransportWrongTokenFailsToDecrypt(t *testing.T) {
 	}
 }
 
-// An old app build, or a different app entirely, never wraps its transport
-// in EncryptedTransport at all - so from the exit node's side this looks
-// exactly like plain, unencrypted packets arriving on the wire. Since the
-// caller only wraps a key's transport in this type when that key's
-// e2e_encryption is actually on (see the type's doc comment), the node
-// finding itself unable to decrypt real traffic here means the two ends
-// disagree about that setting - dropping instead of passing it through is
-// what makes the setting actually mandatory rather than advisory.
+// An old app build never wraps its transport in EncryptedTransport, so unable-to-decrypt here means the two ends disagree about e2e_encryption - dropping instead of passing through makes the setting mandatory.
 func TestEncryptedTransportExitNodeDropsUnencryptedPeer(t *testing.T) {
 	rawA, rawB := newPipe()
 	node := NewEncryptedTransport(rawA, "shared-secret-token", true)

@@ -14,18 +14,9 @@ type nodeKeyResponse struct {
 	Transport         string   `json:"transport"`
 	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 	BytesUsedTotal    int64    `json:"bytes_used_total"`
-	// Token is the raw key token, decrypted here (only a node-authenticated
-	// request reaches this handler at all) so the assigned worker can derive
-	// the same end-to-end encryption key the client used - see
-	// transport.NewEncryptedTransport. Empty for a key created before this
-	// existed (token_enc is null).
+	// Token is the raw key token, decrypted here since only a node-authenticated request reaches this handler, so the worker can derive the same end-to-end key the client used.
 	Token string `json:"token,omitempty"`
-	// E2EEncryption is the operator's binding decision for this key (see
-	// model.Key.E2EEncryption) - the node wraps the worker's transport in
-	// transport.EncryptedTransport if and only if this is true, matching
-	// exactly what the client does with the same flag from its own deep
-	// link. Previously the node had no way to see this setting at all and
-	// guessed per-peer instead, making the panel's toggle purely advisory.
+	// E2EEncryption is binding: the node wraps the worker's transport in EncryptedTransport if and only if this is true - previously the node guessed per-peer, making the panel's toggle purely advisory.
 	E2EEncryption bool `json:"e2e_encryption,omitempty"`
 }
 

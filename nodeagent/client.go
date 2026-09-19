@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-// ControlClient talks to the openflux-control HTTP API on behalf of one
-// exit-node process, using that node's bearer token.
 type ControlClient struct {
 	baseURL    string
 	nodeToken  string
@@ -29,25 +27,14 @@ func NewControlClient(baseURL, nodeToken string) *ControlClient {
 }
 
 type RemoteKey struct {
-	ID     string `json:"id"`
-	DocURL string `json:"doc_url"`
-	// DocURLs is set instead of DocURL for transport "yandex_multistream"
-	// (2+ URLs) - see transport.NewMultiStreamTransport.
+	ID                string   `json:"id"`
+	DocURL            string   `json:"doc_url"`
 	DocURLs           []string `json:"doc_urls,omitempty"`
 	Transport         string   `json:"transport"`
 	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 	BytesUsedTotal    int64    `json:"bytes_used_total"`
-	// Token, when set, is the raw key token - used as the end-to-end
-	// encryption key (see transport.NewEncryptedTransport) when
-	// E2EEncryption is also true. Empty for a key created before token_enc
-	// existed.
-	Token string `json:"token,omitempty"`
-	// E2EEncryption mirrors the key's e2e_encryption setting from the panel
-	// - startWorker wraps this worker's transport in
-	// transport.EncryptedTransport if and only if this is true, the same
-	// condition the client applies from its own deep link. This is what
-	// makes the setting actually binding instead of advisory - see
-	// transport.EncryptedTransport's doc comment.
+	Token             string   `json:"token,omitempty"`
+	// E2EEncryption mirrors the key's e2e_encryption setting; startWorker only wraps the transport in EncryptedTransport when this is true, making the setting binding rather than advisory.
 	E2EEncryption bool `json:"e2e_encryption,omitempty"`
 }
 
@@ -73,9 +60,6 @@ type reportUsageResponse struct {
 	DisabledNow []string `json:"disabled_now"`
 }
 
-// ReportUsage sends batched traffic deltas and returns the keys the control
-// plane disabled as a direct result (over quota), so the caller can tear
-// those workers down immediately instead of waiting for the next poll.
 func (c *ControlClient) ReportUsage(ctx context.Context, deltas []UsageDelta) ([]string, error) {
 	if len(deltas) == 0 {
 		return nil, nil

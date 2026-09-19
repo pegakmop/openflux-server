@@ -62,6 +62,32 @@ func (a *App) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+type patchNodeRequest struct {
+	MaxKeys int `json:"max_keys"`
+}
+
+func (a *App) handlePatchNode(w http.ResponseWriter, r *http.Request) {
+	var req patchNodeRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.MaxKeys <= 0 {
+		writeError(w, http.StatusBadRequest, "max_keys must be positive")
+		return
+	}
+
+	if err := a.Store.SetNodeMaxKeys(r.Context(), r.PathValue("id"), req.MaxKeys); err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	} else if err != nil {
+		writeInternalError(w, r, "update node failed", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
 func (a *App) handleRotateNodeToken(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -167,10 +193,7 @@ type rotateKeyTokenResponse struct {
 	DeepLink string `json:"deep_link,omitempty"`
 }
 
-// handleRotateKeyToken issues a fresh token for an existing key, since the
-// original one is only ever stored hashed - there's no other way to get a
-// usable token (or the deep link built from it) for a key whose raw token
-// from creation is already gone. Every other field is untouched.
+// handleRotateKeyToken exists because the original token is only ever stored hashed - there's no other way to get a usable token for a key whose raw token is gone.
 func (a *App) handleRotateKeyToken(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -251,10 +274,7 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 
-		// Only re-enabling needs the doc_url check: a disabled key isn't
-		// running a worker and can't collide with anything (see
-		// HasEnabledKeyWithAnyDocURL's doc comment), and disabling never
-		// changes its URLs so it can't create a collision either.
+		// Only re-enabling needs the doc_url check: a disabled key isn't running a worker and can't collide with anything, and disabling never changes its URLs.
 		if enabled {
 			k, err := a.Store.GetKeyByID(r.Context(), id)
 			if err == store.ErrNotFound {
@@ -268,10 +288,7 @@ func (a *App) handleSetKeyEnabled(enabled bool) http.HandlerFunc {
 			if len(urls) == 0 {
 				urls = []string{k.DocURL}
 			}
-			// Guarded: holds a DB-level advisory lock on urls for the check
-			// and the enable together, so two concurrent re-enable requests
-			// for keys sharing a doc_url can't both pass the check before
-			// either commits (see CreateKeyGuarded's doc comment).
+			// Guarded: holds a DB-level advisory lock on urls for the check and the enable together, so two concurrent re-enable requests can't both pass the check before either commits.
 			err = a.Store.SetKeyEnabledGuarded(r.Context(), id, urls)
 			if err == store.ErrDocURLInUse {
 				writeError(w, http.StatusConflict, "doc_url is already used by another enabled key - each key needs its own Yandex Docs document")

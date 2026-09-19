@@ -26,39 +26,17 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-// writerLoop batches several queued packets into one length-prefixed blob
-// (Volga's framing, reused via decodeBatch) instead of one WebSocket frame
-// per packet, since per-message base64/JSON/WriteMessage overhead dominates
-// at higher packet rates on an exit node juggling many keys.
-//
-// batchMarker prefixes a batched payload so a peer can tell it apart from a
-// lone compressed packet: transport.Compress only ever emits 0x00 or 0x1F as
-// its own first byte, so 0xFE never collides. Sending is gated separately
-// by peer capability - see kaBatchCapabilityToken.
+// writerLoop batches queued packets into one length-prefixed blob (Volga's framing) instead of one WS frame per packet, since per-message overhead dominates at higher packet rates.
 const batchMarker = 0xFE
 
-// kaBatchCapabilityToken rides in the keepalive so a peer only receives
-// batched frames once its code is known to handle batchMarker (see
-// peerBatches) - an older peer's receive path has no such check and a
-// batched frame would just fail to decompress.
 const kaBatchCapabilityToken = "+batch1"
 
-// zstdBatchMarker flags EnableSelfCompression's whole-batch format: raw
-// packets, length-prefixed and zstd-compressed as one unit via
-// transport.EncodeBatch (see EnableSelfCompression for why this beats
-// per-packet LZ4). Distinct from batchMarker and from 0x00/0x1F.
+// zstdBatchMarker (0xFE) flags EnableSelfCompression's whole-batch format, distinct from batchMarker and transport.Compress's own 0x00/0x1F first bytes.
 const zstdBatchMarker = 0xFD
 
-// kaZstdBatchCapabilityToken is kaBatchCapabilityToken's counterpart for
-// zstdBatchMarker (see peerZstdBatches).
 const kaZstdBatchCapabilityToken = "+zbatch1"
 
-// kaEncSelfCompressToken proves a peer specifically supports
-// EnableEncryptedSelfCompression - understanding zstdBatchMarker in general
-// isn't enough, since a peer can support that while still using the
-// traditional CompressedTransport(EncryptedTransport(...)) wrapping for an
-// e2e_encryption key. Sent only when this instance is in that mode (see
-// keepAliveLoop), unlike the other two tokens which are unconditional.
+// kaEncSelfCompressToken proves a peer supports EnableEncryptedSelfCompression specifically, since a peer can support zstdBatchMarker while still using the traditional external-wrapper encryption.
 const kaEncSelfCompressToken = "+encsc1"
 
 const (
@@ -67,25 +45,13 @@ const (
 	ydocsBatchMaxBytes = 4 * 1024 * 1024
 )
 
-// wsWriteTimeout bounds every WebSocket write - without it, a stalled write
-// blocks WriteMessage forever and writerLoop (the one goroutine draining a
-// session's queue for its whole life) wedges there permanently.
+// wsWriteTimeout bounds every WebSocket write; without it a stalled write blocks writerLoop, the one goroutine draining a session's queue, forever.
 const wsWriteTimeout = 10 * time.Second
 
-// defaultPingWindow is used when the server's engine.io "open" packet can't
-// be parsed for its own pingInterval/pingTimeout (see performHandshake) -
-// 25s+20s matches Socket.IO's own common server-side defaults.
 const defaultPingWindow = 45 * time.Second
 
-// handshakeTimeout bounds how long connectToDoc waits for the engine.io
-// open packet and the socket.io namespace-connect ack before giving up and
-// reconnecting - see the package-level doc comment on performHandshake for
-// why this handshake has to be awaited at all.
 const handshakeTimeout = 15 * time.Second
 
-// Reason codes passed to scheduleReconnect and reported as the last field of
-// transport.EventRetrying's detail - see mobile.Callback.OnLogEvent and the
-// Android app's Logs tab for how these map to human-readable text.
 const (
 	reasonFetchFailed     = "fetch_failed"
 	reasonDialFailed      = "dial_failed"
@@ -135,100 +101,38 @@ type YandexDocsTransport struct {
 	userCounter atomic.Int32
 	baseUserID  string
 
-	// recentSent guards against self-echo: Yandex's doc broadcasts every
-	// "cursor" event to every participant including the sender, so a packet
-	// we just sent (see writerLoop) would otherwise come back through
-	// handleMessage and get reinjected as if the peer had sent it. A
-	// short-lived hash of every sent payload lets an inbound match be
-	// dropped without depending on Yandex's broadcast wrapping format.
+	// recentSent guards against self-echo: Yandex's doc broadcasts every event to every participant including the sender, so a short-lived hash of sent payloads lets a matching inbound be dropped.
 	recentSentMu sync.Mutex
 	recentSent   map[uint32]time.Time
 
-	// peerBatches is learned from the peer's keepalive (kaBatchCapabilityToken):
-	// only send batched frames once the peer is known to parse batchMarker.
 	peerBatches atomic.Bool
 
 	// peerZstdBatches is peerBatches' counterpart for zstdBatchMarker.
 	peerZstdBatches atomic.Bool
 
-	// selfCompress/encrypted/encSend/encRecv are set at most once before
-	// Start and never written again (same contract as SetEventCallback),
-	// so reading them from writerLoop/handleMessage without a lock is safe.
+	// selfCompress/encrypted/encSend/encRecv are set once before Start and never written again, so reading them without a lock from writerLoop/handleMessage is safe.
 	selfCompress bool
 
-	// encrypted, encSend, encRecv, encSendCtr hold
-	// EnableEncryptedSelfCompression's state: encSend/encRecv are this
-	// connection's derived ChaCha20-Poly1305 keys, encSendCtr this side's
-	// nonce counter - independent of any external EncryptedTransport.
 	encrypted  bool
 	encSend    [chacha20poly1305.KeySize]byte
 	encRecv    [chacha20poly1305.KeySize]byte
 	encSendCtr atomic.Uint64
 
-	// peerEncSelfCompress proves a peer specifically supports encrypted
-	// self-compression; peerZstdBatches alone isn't enough (see
-	// kaEncSelfCompressToken).
 	peerEncSelfCompress atomic.Bool
 
-	// wakeReconnect, guarded by Mu, is non-nil exactly while scheduleReconnect
-	// sleeps out a backoff delay - see ForceReconnect.
 	wakeReconnect chan struct{}
 }
 
-// EnableSelfCompression switches this transport to managing its own
-// per-batch compression (see writerLoop/handleMessage) instead of expecting
-// a caller-side transport.CompressedTransport to compress each packet
-// before Send. Call before Start; not safe to change afterward.
-//
-// Per-packet LZ4 (transport.CompressedTransport) misses redundancy between
-// packets in the same batch and pays a full LZ4 frame's overhead each time.
-// Once a peer's keepalive proves it understands zstdBatchMarker, writerLoop
-// instead zstd-compresses a whole batch of raw packets as one unit
-// (transport.EncodeBatch); until then it falls back to reproducing
-// transport.CompressedTransport's per-packet wire format so an unmodified
-// peer stays compatible.
-//
-// Must not be combined with wrapping this transport in
-// transport.CompressedTransport (packets would be compressed twice). For an
-// e2e_encryption key, use EnableEncryptedSelfCompression instead - a plain
-// transport.EncryptedTransport wrapper would encrypt this method's batching
-// decisions like opaque bytes and defeat the point.
+// EnableSelfCompression makes writerLoop zstd-compress a whole batch of raw packets once the peer's keepalive proves it understands zstdBatchMarker, beating per-packet LZ4's missed cross-packet redundancy; not for use alongside external CompressedTransport wrapping.
 func (t *YandexDocsTransport) EnableSelfCompression() {
 	t.selfCompress = true
 }
 
-// EnableEncryptedSelfCompression is EnableSelfCompression plus end-to-end
-// encryption, for a key with e2e_encryption on. token/isExitNode derive the
-// same keys transport.NewEncryptedTransport would (transport.DeriveDirectionalKeys);
-// both ends must call this with the same token and opposite isExitNode.
-// Call before Start; not safe to change afterward.
-//
-// This needs its own method rather than wrapping EnableSelfCompression's
-// output in transport.EncryptedTransport externally: encrypting each packet
-// before batching destroys the cross-packet redundancy batching raw packets
-// was meant to exploit (ciphertext is high-entropy, so zstd finds nothing to
-// compress). Instead this batches and zstd-compresses RAW packets first,
-// then encrypts the whole compressed batch as one unit (transport.Seal) -
-// encryption still only ever seals already-compressed bytes.
-//
-// Understanding zstdBatchMarker in general does NOT prove a peer supports
-// ENCRYPTED self-compression for this key - a peer can support the former
-// while still using the traditional CompressedTransport(EncryptedTransport(...))
-// wrapping for an e2e_encryption key - so this is gated by its own token,
-// kaEncSelfCompressToken. Until a peer proves it, this reproduces that
-// traditional wrapping's exact wire format (encrypt each compressed packet
-// independently, then batch the ciphertexts) so an unmodified peer using
-// the external-wrapper architecture stays compatible. Receiving is
-// unconditional: this side can decrypt either format from any peer sharing
-// the same token, regardless of which format the peer sends.
+// EnableEncryptedSelfCompression batches and zstd-compresses raw packets first, then encrypts the whole compressed batch as one unit, since encrypting per-packet first would destroy the cross-packet redundancy batching exploits; gated by its own kaEncSelfCompressToken separate from zstdBatchMarker support.
 func (t *YandexDocsTransport) EnableEncryptedSelfCompression(token string, isExitNode bool) {
 	t.enableEncryptedSelfCompression(token, isExitNode, "")
 }
 
-// EnableEncryptedSelfCompressionForStream is
-// EnableEncryptedSelfCompression for one stream of a MultiStreamTransport -
-// see transport.NewEncryptedTransportForStream's doc comment on why each
-// stream needs its own derived key.
 func (t *YandexDocsTransport) EnableEncryptedSelfCompressionForStream(token string, isExitNode bool, streamIndex int) {
 	t.enableEncryptedSelfCompression(token, isExitNode, fmt.Sprintf(" stream %d", streamIndex))
 }
@@ -248,10 +152,6 @@ func NewYandexDocsTransport(url string, config transport.TransportConfig) *Yande
 	return t
 }
 
-// normalizeDocURL rewrites a Yandex Disk share link ("disk.yandex.ru/i/<hash>")
-// to the equivalent docs.yandex.ru URL fetchDocInfo expects - both serve the
-// same client-config page, just under different hostnames. Anything else
-// passes through unchanged.
 func normalizeDocURL(raw string) string {
 	u, err := neturl.Parse(raw)
 	if err != nil {
@@ -276,11 +176,7 @@ func (t *YandexDocsTransport) Start() error {
 	return nil
 }
 
-// Send queues data for the writer loop to put on the wire. Deliberately
-// does not require IsConnected(): a session's WriteQueue is reused across a
-// reconnect (see connectToDoc) specifically so a brief drop can queue data
-// instead of dropping it and forcing the real end-to-end TCP connection to
-// notice the loss and retransmit on its own, much slower, timeout.
+// Send doesn't require IsConnected(): a session's WriteQueue is reused across a reconnect so a brief drop can queue data instead of forcing the tunnel's own TCP to notice loss and retransmit.
 func (t *YandexDocsTransport) Send(data []byte) error {
 	t.Mu.RLock()
 	session := t.session
@@ -337,8 +233,6 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		headers.Set("Origin", info.Origin)
 		headers.Set("Cookie", info.CookieStr)
 		headers.Set("Host", info.Host)
-		// WebSocket upgrade, not a page load - real Firefox sends these
-		// Sec-Fetch-* values for a same-origin WS opened from a loaded page.
 		headers.Set("Sec-Fetch-Dest", "websocket")
 		headers.Set("Sec-Fetch-Mode", "websocket")
 		headers.Set("Sec-Fetch-Site", "same-origin")
@@ -350,10 +244,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 			return
 		}
 
-		// The engine.io/socket.io handshake must complete before anything
-		// else goes over this socket - sending data ahead of the server's
-		// connect ack lands it in an unconfirmed namespace, which makes
-		// OnlyOffice's backend tear the connection down with close code 1005.
+		// The engine.io/socket.io handshake must complete before anything else goes over this socket, or OnlyOffice's backend tears the connection down with close code 1005.
 		readTimeout, err := t.performHandshake(conn, info.Token)
 		if err != nil {
 			utils.Debugf("[YDOCS] handshake failed: %v", err)
@@ -376,7 +267,6 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 
 		t.Mu.Lock()
 		t.session = session
-		t.SetConnected(true)
 		t.Mu.Unlock()
 
 		if existingSession == nil {
@@ -392,18 +282,18 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 		messagePart, err := json.Marshal([]interface{}{"message", authData})
 		if err != nil {
 			utils.Debugf("[YDOCS] marshal auth message failed: %v", err)
-			t.SetConnected(false)
 			conn.Close()
 			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
 		}
 		if err := session.safeWrite(websocket.TextMessage, []byte(fmt.Sprintf("42%s", string(messagePart)))); err != nil {
 			utils.Debugf("[YDOCS] send auth message failed: %v", err)
-			t.SetConnected(false)
 			conn.Close()
 			t.scheduleReconnect(attempt, reasonSendFailed, err)
 			return
 		}
+		// Must come after auth, not before - a queued writerLoop backlog could otherwise beat it onto the wire.
+		t.SetConnected(true)
 		t.EmitEvent(transport.EventConnected, strconv.Itoa(attempt+1))
 		connectedAt := time.Now()
 
@@ -414,10 +304,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 				utils.Debugf("[YDOCS] Read error: %v", err)
 				t.SetConnected(false)
 				conn.Close()
-				// A session that stayed up a while before dropping is a
-				// normal blip, not evidence backoff should keep growing -
-				// otherwise a long-lived transport's backoff ratchets up to
-				// MaxReconnectDelay and stays there for every future drop.
+				// A session that stayed up a while before dropping counts as a normal blip, not evidence backoff should keep growing, or a long-lived transport's backoff ratchets up and stays maxed forever.
 				next := attempt
 				if time.Since(connectedAt) > 15*time.Second {
 					next = 0
@@ -430,19 +317,7 @@ func (t *YandexDocsTransport) connectToDoc(attempt int) {
 	}()
 }
 
-// performHandshake waits out the engine.io/socket.io connection sequence:
-//
-//  1. server -> client: engine.io "open" packet ("0{...}"), carrying the
-//     server's pingInterval/pingTimeout;
-//  2. client -> server: socket.io namespace-connect ("40{"token":...}"),
-//     sent only once (1) has arrived;
-//  3. server -> client: namespace-connect ack ("40{"sid":...}") or a
-//     connect-error ("44...") - the socket is usable only after the ack.
-//
-// Engine.io pings ("2") can arrive at any point and are answered ("3")
-// immediately regardless of handshake progress. Returns the read-idle
-// timeout for the rest of this connection's life, derived from the
-// server's ping settings so a silently-dead connection is detected.
+// performHandshake waits out the engine.io open packet, then the socket.io namespace-connect ack (the socket is usable only after); pings are answered immediately regardless of handshake progress.
 func (t *YandexDocsTransport) performHandshake(conn *websocket.Conn, token string) (time.Duration, error) {
 	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	defer conn.SetReadDeadline(time.Time{})
@@ -506,14 +381,9 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 		}
 		switch {
 		case t.encrypted && t.peerEncSelfCompress.Load():
-			// batch holds RAW packets - frame+zstd-compress as one unit,
-			// then encrypt that as one unit (EnableEncryptedSelfCompression).
 			t.sendEncryptedZstdBatch(session, batch)
 		case t.encrypted:
-			// Peer hasn't proven encrypted self-compression for this key -
-			// reproduce CompressedTransport(EncryptedTransport(...))'s exact
-			// per-packet format (compress then encrypt each independently)
-			// so an unmodified peer using that wrapping stays compatible.
+			// Peer hasn't proven encrypted self-compression for this key, so reproduce the traditional compress-then-encrypt-each-packet format for compatibility.
 			sealed := make([][]byte, 0, len(batch))
 			for _, pkt := range batch {
 				ciphertext, err := transport.Seal(t.encSend, t.encSendCtr.Add(1), transport.Compress(pkt))
@@ -533,13 +403,9 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 				}
 			}
 		case t.selfCompress && t.peerZstdBatches.Load():
-			// batch holds RAW packets (nothing upstream compressed them) -
-			// frame and zstd-compress the whole thing as one unit.
 			t.sendZstdBatch(session, batch)
 		case t.selfCompress:
-			// Peer hasn't proven zstdBatchMarker support - reproduce
-			// transport.CompressedTransport's per-packet format so the wire
-			// bytes match what an unmodified peer expects.
+			// Peer hasn't proven zstdBatchMarker support, so reproduce transport.CompressedTransport's per-packet format so the wire bytes match what it expects.
 			compressed := make([][]byte, len(batch))
 			for i, pkt := range batch {
 				compressed[i] = transport.Compress(pkt)
@@ -563,10 +429,7 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 	}
 
 	for t.IsRunning() {
-		// t.session is never nil'd on disconnect (see connectToDoc) - it
-		// keeps pointing at the old, dead session until replaced, so a nil
-		// check alone never catches a drop. IsConnected() is what actually
-		// keeps queued data queued until a live session exists to drain it.
+		// t.session is never nil'd on disconnect, so a nil check alone never catches a drop - IsConnected() is what actually keeps queued data queued until a live session exists.
 		t.Mu.RLock()
 		session := t.session
 		connected := t.IsConnected()
@@ -584,17 +447,11 @@ func (t *YandexDocsTransport) writerLoop(queue chan []byte) {
 				flush(session)
 			}
 		case <-time.After(ydocsBatchTimeout):
-			// Whatever's accumulated so far (even a single packet) goes
-			// out now rather than waiting for a full batch - low traffic
-			// must not turn into added latency.
 			flush(session)
 		}
 	}
 }
 
-// sendBatch frames batch as one length-prefixed blob (batchMarker + Volga's
-// [len,data]... encoding, decoded via decodeBatch), base64s it, and writes
-// it as a single "cursor" message.
 func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 	var blob bytes.Buffer
 	blob.WriteByte(batchMarker)
@@ -608,8 +465,6 @@ func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 
 	t.markSent(framed)
 	if utils.IsVerbose() {
-		// batch's items are already compressed/sealed opaque bytes here, not
-		// raw IP packets - only byte/packet counts are safe to log.
 		utils.Debugf("[YDOCS] -> %d bytes (%d packets)\n", len(framed), len(batch))
 	}
 
@@ -621,9 +476,6 @@ func (t *YandexDocsTransport) sendBatch(session *DocSession, batch [][]byte) {
 	}
 }
 
-// sendZstdBatch frames batch (raw packets) with zstdBatchMarker +
-// transport.EncodeBatch's zstd encoding. Only called once the peer's
-// keepalive has proven it understands zstdBatchMarker.
 func (t *YandexDocsTransport) sendZstdBatch(session *DocSession, batch [][]byte) {
 	encoded := transport.EncodeBatch(batch)
 	framed := make([]byte, 1+len(encoded))
@@ -643,9 +495,6 @@ func (t *YandexDocsTransport) sendZstdBatch(session *DocSession, batch [][]byte)
 	}
 }
 
-// sendEncryptedZstdBatch is sendZstdBatch plus encryption: the
-// [zstdBatchMarker][EncodeBatch(batch)] plaintext sealed as one unit. Only
-// called once the peer's keepalive proves it understands this format.
 func (t *YandexDocsTransport) sendEncryptedZstdBatch(session *DocSession, batch [][]byte) {
 	encoded := transport.EncodeBatch(batch)
 	plaintext := make([]byte, 1+len(encoded))
@@ -671,8 +520,6 @@ func (t *YandexDocsTransport) sendEncryptedZstdBatch(session *DocSession, batch 
 	}
 }
 
-// sendSingle is the legacy one-packet-per-message format, used until the
-// peer's keepalive proves it understands batched frames (see peerBatches).
 func (t *YandexDocsTransport) sendSingle(session *DocSession, packet []byte) {
 	t.markSent(packet)
 	if utils.IsVerbose() {
@@ -687,10 +534,6 @@ func (t *YandexDocsTransport) sendSingle(session *DocSession, packet []byte) {
 	}
 }
 
-// markSent records that data was just sent so a later self-echo can be
-// recognized and dropped (see recentSent). Entries age out opportunistically
-// here rather than needing an explicit cap: an echo either arrives within a
-// couple seconds or not at all.
 func (t *YandexDocsTransport) markSent(data []byte) {
 	h := crc32.ChecksumIEEE(data)
 	now := time.Now()
@@ -711,10 +554,6 @@ func (t *YandexDocsTransport) markSent(data []byte) {
 	}
 }
 
-// wasRecentlySent reports whether data matches something markSent recorded
-// in the last 5 seconds - well over one round trip to Yandex's servers, so
-// this only matches a genuine self-echo (a coincidental CRC32 collision is
-// astronomically unlikely).
 func (t *YandexDocsTransport) wasRecentlySent(data []byte) bool {
 	h := crc32.ChecksumIEEE(data)
 
@@ -728,11 +567,7 @@ func (t *YandexDocsTransport) wasRecentlySent(data []byte) bool {
 func (t *YandexDocsTransport) keepAliveLoop() {
 	ticker := time.NewTicker(t.GetConfig().KeepAliveInterval)
 	defer ticker.Stop()
-	// Capability tokens ride inside the "---KA---" keepalive as substrings, so
-	// a peer recognizing only some (or none) still matches "---KA---" and
-	// whatever it knows. kaEncSelfCompressToken is conditional on t.encrypted
-	// (it must prove THIS instance is in encrypted self-compression mode);
-	// the other two are sent unconditionally.
+	// kaEncSelfCompressToken is conditional on t.encrypted (must prove this instance is in encrypted mode); the other two capability tokens are sent unconditionally.
 	keepAliveMsg := `42["message",{"type":"cursor","cursor":"18;---KA---` + kaBatchCapabilityToken + kaZstdBatchCapabilityToken
 	if t.encrypted {
 		keepAliveMsg += kaEncSelfCompressToken
@@ -745,12 +580,11 @@ func (t *YandexDocsTransport) keepAliveLoop() {
 		session := t.session
 		t.Mu.Unlock()
 
-		if session != nil && session.Conn != nil {
+		// IsConnected() too, not just session/Conn - avoids the same pre-auth send window writerLoop had.
+		if session != nil && session.Conn != nil && t.IsConnected() {
 			if err := session.safeWrite(websocket.TextMessage, []byte(keepAliveMsg)); err != nil {
 				utils.Debugf("[YDOCS] Keep-alive failed: %v", err)
 				t.SetConnected(false)
-				// Unblocks the read loop's ReadMessage() immediately instead
-				// of waiting out the full read-deadline window.
 				session.Conn.Close()
 			}
 		}
@@ -795,8 +629,6 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 			return
 		}
 
-		// Self-echo: the doc broadcasts every cursor event to every
-		// participant including the sender (see recentSent).
 		if t.wasRecentlySent(decoded) {
 			if utils.IsVerbose() {
 				utils.Debugf("[YDOCS] dropped self-echo (%d bytes)\n", len(decoded))
@@ -815,10 +647,6 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 			return
 		}
 
-		// zstdBatchMarker flags decoded as EnableSelfCompression's whole-batch
-		// format (raw packets, zstd-compressed as one unit). Decoding it
-		// doesn't depend on our own t.selfCompress - a peer capable of
-		// sending it is by construction capable of receiving plain packets.
 		if len(decoded) > 0 && decoded[0] == zstdBatchMarker {
 			pkts, err := transport.DecodeBatch(decoded[1:])
 			if err != nil {
@@ -831,11 +659,7 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 			return
 		}
 
-		// batchMarker flags decoded as several length-prefixed
-		// transport.Compress'd packets. In self-compress mode there's no
-		// external CompressedTransport to decompress them, so this does it
-		// before handing packets upward; otherwise the caller's own
-		// CompressedTransport.Receive expects to do that itself.
+		// In self-compress mode there's no external CompressedTransport to decompress a batchMarker-wrapped batch, so this decompresses it before handing packets upward.
 		if len(decoded) > 0 && decoded[0] == batchMarker {
 			for _, pkt := range decodeBatch(decoded[1:]) {
 				if !t.selfCompress {
@@ -865,18 +689,7 @@ func (t *YandexDocsTransport) handleMessage(session *DocSession, data []byte) {
 	}
 }
 
-// handleEncryptedMessage dispatches decoded wire bytes for an
-// EnableEncryptedSelfCompression'd transport - every path ends in a decrypt,
-// but at a different point depending on which wire format arrived:
-//
-//   - the legacy per-item fallback has an UNENCRYPTED batchMarker wrapping
-//     individually encrypted items, so each is decrypted separately;
-//   - the whole-batch format and the old single-item fallback are both
-//     entirely ciphertext, distinguishable only after decrypting (by
-//     zstdBatchMarker as the plaintext's first byte, or not).
-//
-// Decrypting the wrong span would just fail authentication and drop
-// everything, which is what this dispatch exists to avoid.
+// handleEncryptedMessage dispatches by wire format: the legacy fallback has an unencrypted batchMarker wrapping individually-encrypted items, while the other formats are entirely ciphertext, distinguishable only after decrypting.
 func (t *YandexDocsTransport) handleEncryptedMessage(decoded []byte) {
 	if len(decoded) > 0 && decoded[0] == batchMarker {
 		for _, item := range decodeBatch(decoded[1:]) {
@@ -943,10 +756,6 @@ func (t *YandexDocsTransport) extractBase64String(response string) string {
 	return ""
 }
 
-// scheduleReconnect waits out an exponential backoff before retrying,
-// instead of hammering the server in a tight loop on every failed attempt.
-// cause carries the actual error alongside reasonCode's fixed category, for
-// a caller that wants to show both.
 func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, cause error) {
 	if !t.IsRunning() || attempt >= t.GetConfig().MaxReconnectAttempts {
 		return
@@ -958,9 +767,6 @@ func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, 
 	causeText := strings.ReplaceAll(cause.Error(), "\n", " ")
 	t.EmitEvent(transport.EventRetrying, fmt.Sprintf("%d|%d|%s|%s", attempt+1, int(delay.Seconds()), reasonCode, causeText))
 	if delay > 0 {
-		// wake lets ForceReconnect cut this short - published under Mu so a
-		// concurrent ForceReconnect either sees and closes it, or arrives
-		// too early/late to matter.
 		wake := make(chan struct{})
 		t.Mu.Lock()
 		t.wakeReconnect = wake
@@ -985,20 +791,10 @@ func (t *YandexDocsTransport) scheduleReconnect(attempt int, reasonCode string, 
 	t.connectToDoc(attempt + 1)
 }
 
-// ForceReconnect makes the transport retry right now: drops a live
-// connection so its read loop redials through scheduleReconnect, or, if
-// instead sleeping out a backoff delay, cuts that wait short. No-op if
-// neither applies.
-//
-// A network change (Wi-Fi to mobile data) often leaves the old socket
-// silently dead rather than reset - nothing notices until a read times out,
-// far later than the backoff delay this skips. A caller that already knows
-// the network changed can report that here instead of waiting for TCP.
+// ForceReconnect lets a caller that already knows the network changed skip waiting for a read to time out, since a network change often leaves the old socket silently dead rather than reset.
 func (t *YandexDocsTransport) ForceReconnect() {
 	t.Mu.Lock()
 	session := t.session
-	// t.session is never nil'd on disconnect, so session != nil alone can't
-	// distinguish "connected now" from "backoff sleep with a stale session".
 	live := t.IsConnected()
 	wake := t.wakeReconnect
 	t.wakeReconnect = nil // claimed under the lock so a concurrent call can't double-close wake
@@ -1026,10 +822,7 @@ func (t *YandexDocsTransport) backoffDelay(attempt int) time.Duration {
 	}
 
 	delay := float64(cfg.ReconnectDelay) * math.Pow(multiplier, float64(attempt))
-	// +0-50% jitter, applied before the cap: every reconnect registers as a
-	// brand new participant in Yandex's doc-collab room regardless of
-	// user-id reuse, so many clients losing the same document at once would
-	// otherwise retry in lockstep and pile up "ghost" participants.
+	// +0-50% jitter is applied before the cap so many clients losing the same document at once don't retry in lockstep and pile up ghost participants.
 	delay += delay * 0.5 * rand.Float64()
 	if cfg.MaxReconnectDelay > 0 && delay > float64(cfg.MaxReconnectDelay) {
 		delay = float64(cfg.MaxReconnectDelay)
@@ -1065,8 +858,6 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 	re := regexp.MustCompile(`<script[^>]*id="client-config"[^>]*>(.*?)</script>`)
 	matches := re.FindStringSubmatch(html)
 	if len(matches) < 2 {
-		// Flag a CAPTCHA/bot-check page explicitly rather than leaving
-		// "config not found" to be diagnosed by hand from the HTML preview.
 		lower := strings.ToLower(html)
 		if strings.Contains(lower, "captcha") {
 			utils.Debugf("[YDOCS] response looks like a CAPTCHA/bot-check page, not the doc editor")
@@ -1084,11 +875,7 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 		return YandexDocsInfo{}, fmt.Errorf("parse client-config: %w", err)
 	}
 
-	// Every lookup here is a checked type assertion, not config["x"].(T):
-	// this runs in a goroutine with no recover(), so an unchecked assertion
-	// would crash the process the moment Yandex serves an unexpected page
-	// shape (error page, A/B layout, partial response) instead of just
-	// failing this connect attempt.
+	// Every config lookup is a checked type assertion since this runs in a goroutine with no recover(), so an unchecked assertion would crash the process on an unexpected page shape.
 	officeAction, ok := config["officeActionData"].(map[string]interface{})
 	if !ok {
 		utils.Debugf("[YDOCS] config top-level keys: %v", mapKeys(config))
@@ -1103,11 +890,7 @@ func (t *YandexDocsTransport) fetchDocInfo(url, userID string) (YandexDocsInfo, 
 
 	balancerURL, ok := officeAction["balancer_url"].(string)
 	if !ok {
-		// officeActionData + editor_config present but balancer_url missing
-		// is the confirmed signature of a newer-generation Yandex document
-		// this transport can't talk to; YandexVolgaTransport (a different
-		// auth flow - see volga.go's authorize()) can. Not detectable before
-		// this point since it's specific to the individual doc, not the URL.
+		// officeActionData + editor_config present but balancer_url missing is the confirmed signature of a newer-generation document this transport can't talk to; only YandexVolgaTransport can.
 		utils.Debugf("[YDOCS] officeActionData keys: %v, editor_config keys: %v", mapKeys(officeAction), mapKeys(editorConfigRaw))
 		return YandexDocsInfo{}, fmt.Errorf("balancer_url missing - this document looks like a newer Yandex Docs type this transport doesn't support; try the Volga transport for this doc_url instead")
 	}

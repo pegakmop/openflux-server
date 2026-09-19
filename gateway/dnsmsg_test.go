@@ -120,8 +120,6 @@ func TestDNSARecordsTruncated(t *testing.T) {
 	msg := buildResponse(qname, [][]byte{
 		appendRecord(nil, []byte{0xC0, 0x0C}, dnsTypeA, 60, []byte{93, 184, 216, 34}),
 	})
-	// Feed every strict prefix; must not panic, and must not return records
-	// for prefixes too short to contain one.
 	for cut := 0; cut < len(msg); cut++ {
 		func() {
 			defer func() {
@@ -175,8 +173,6 @@ func TestDNSCachePrunesWhenLarge(t *testing.T) {
 		recs = append(recs, dnsARecord{domain: "h.example.com", ip: "10.0.0.1", ttl: 60})
 	}
 	c.record(recs)
-	// After the write the map must stay bounded (the same IP overwrites, so
-	// no crash and a sane size).
 	if len(c.expiry) > 8192 {
 		t.Errorf("cache grew to %d entries", len(c.expiry))
 	}

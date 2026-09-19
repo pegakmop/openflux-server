@@ -91,6 +91,17 @@ func (s *Store) RotateNodeSecret(ctx context.Context, id, newSecretHash string) 
 	return nil
 }
 
+func (s *Store) SetNodeMaxKeys(ctx context.Context, id string, maxKeys int) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE nodes SET max_keys = $1 WHERE id = $2`, maxKeys, id)
+	if err != nil {
+		return fmt.Errorf("set node max_keys: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) TouchNodeHeartbeat(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE nodes SET last_heartbeat_at = now() WHERE id = $1`, id)
 	if err != nil {

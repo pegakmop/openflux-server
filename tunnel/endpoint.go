@@ -27,19 +27,10 @@ func NewTunnelLinkEndpoint() *TunnelLinkEndpoint {
 	return &TunnelLinkEndpoint{}
 }
 
-// PacketCounts reports how many packets have flowed each direction through
-// this endpoint since it was created - a cheap way to tell "nothing is
-// reaching the gateway at all" apart from "packets arrive but relaying
-// fails downstream" when traffic isn't flowing.
 func (e *TunnelLinkEndpoint) PacketCounts() (in, out uint64) {
 	return e.packetIn.Load(), e.packetOut.Load()
 }
 
-// SetOutgoingPacketHandler registers the callback invoked with each raw IP
-// packet gvisor wants to emit on this NIC. Exported so packages outside
-// tunnel (e.g. gateway, which wires this endpoint to a TUN file descriptor
-// instead of a Transport) can reuse this endpoint without a second
-// implementation of the stack.LinkEndpoint interface.
 func (e *TunnelLinkEndpoint) SetOutgoingPacketHandler(fn func([]byte)) {
 	e.onOutgoingPacket = fn
 }
@@ -47,18 +38,10 @@ func (e *TunnelLinkEndpoint) SetOutgoingPacketHandler(fn func([]byte)) {
 func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 	e.packetIn.Add(1)
 	if utils.IsVerbose() {
-		// ParsePacketInfo parses IP/TCP headers and builds a string on every
-		// call - worth skipping when nothing will read it, since this runs
-		// once per inbound packet.
 		utils.Debugf("<- %d bytes - %s\n", len(data), network.ParsePacketInfo(data))
 	}
 
-	// A packet already in flight (e.g. a FIN triggered by the caller
-	// tearing the connection down) can race a concurrent Close()/Destroy()
-	// detaching this endpoint - dispatcher is a plain interface value, so
-	// reading it unsynchronized with Attach's write is a real data race,
-	// not just a theoretical one: it's what let a nil dispatcher slip
-	// through here and crash.
+	// dispatcher is a plain interface value; reading it unsynchronized with Attach's write is a real data race that let a nil dispatcher slip through and crash.
 	e.dispatcherMu.RLock()
 	dispatcher := e.dispatcher
 	e.dispatcherMu.RUnlock()
@@ -66,39 +49,19 @@ func (e *TunnelLinkEndpoint) InjectInbound(data []byte) {
 		return
 	}
 
-	// The stack only registers TCP and UDP transport handlers (see
-	// tunnel.go's stack.New call) - anything else (ICMP, etc.) has no
-	// registered handler, and the exit node's NAT/forwarding code
-	// (SetForwardingDefaultAndAllNICs) nil-pointer-panics trying to dispatch
-	// it instead of returning an error. Confirmed in production: proto=1
-	// (ICMP) from a client's own OS routing a ping into the tunnel's
-	// default route. Dropping non-TCP/UDP here avoids paying for that panic
-	// on every single retransmit of a bad packet. UDP must stay allowed:
-	// it's how general UDP relay works in raw exit mode and how the mobile
-	// client's gateway relays DNS/UDP traffic.
+	// Non-TCP/UDP packets (e.g. ICMP) have no registered handler and nil-pointer-panic the NAT/forwarding code - confirmed in production from a client's OS routing a ping into the tunnel's default route.
 	if len(data) < 20 || (data[9] != 6 && data[9] != 17) {
 		return
 	}
 
-	// gvisor panics on some inputs instead of returning an error - seen in
-	// production as "panic: unexpected transport protocol = 0" from its
-	// NAT/conntrack code. This runs on a shared per-transport goroutine, so
-	// an unrecovered panic here takes the whole process down, disconnecting
-	// every client this exit node serves. Kept as a backstop even after the
-	// protocol check above, which only covers the one cause confirmed so far.
+	// gvisor panics on some inputs instead of erroring (seen in production: "unexpected transport protocol = 0"); this runs on a shared goroutine so an unrecovered panic takes the whole process down.
 	defer func() {
 		if r := recover(); r != nil {
-			// Always logged, not gated behind utils.IsVerbose(): this is
-			// already the rare case worth capturing without --debug running.
 			log.Printf("[TUNNEL] recovered from a panic dispatching an inbound packet (%d bytes, %s): %v",
 				len(data), network.ParsePacketInfo(data), r)
 		}
 	}()
 
-	// buffer.MakeWithData already copies data into gvisor's own pooled chunk,
-	// so handing it data directly (not append([]byte{}, data...)) avoids a
-	// redundant copy: every real caller hands over an exclusively-owned
-	// buffer nothing else touches afterward.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(data),
 	})

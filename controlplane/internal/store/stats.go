@@ -18,21 +18,19 @@ type StatsSummary struct {
 	OnlineNodes        int
 }
 
-// StatsSummary computes the whole-fleet numbers the dashboard renders as
-// its stat cards, in a handful of aggregate queries - deliberately not
-// derived client-side from the (bounded at 100 rows) key list.
 func (s *Store) StatsSummary(ctx context.Context) (StatsSummary, error) {
 	var out StatsSummary
 
+	// bytes_sent_total/bytes_received_total are summed across every key including deleted ones, matching DeleteKey's soft-delete lifetime totals; other counts exclude deleted keys.
 	err := s.pool.QueryRow(ctx, `
 		SELECT
 			coalesce(sum(bytes_sent_total), 0),
 			coalesce(sum(bytes_received_total), 0),
-			count(*),
-			count(*) FILTER (WHERE enabled),
-			count(*) FILTER (WHERE enabled AND traffic_limit_bytes IS NOT NULL
+			count(*) FILTER (WHERE deleted_at IS NULL),
+			count(*) FILTER (WHERE deleted_at IS NULL AND enabled),
+			count(*) FILTER (WHERE deleted_at IS NULL AND enabled AND traffic_limit_bytes IS NOT NULL
 			                AND bytes_sent_total + bytes_received_total >= traffic_limit_bytes),
-			count(*) FILTER (WHERE enabled AND expires_at IS NOT NULL AND expires_at < now())
+			count(*) FILTER (WHERE deleted_at IS NULL AND enabled AND expires_at IS NOT NULL AND expires_at < now())
 		FROM keys
 	`).Scan(&out.TotalBytesSent, &out.TotalBytesReceived, &out.TotalKeys, &out.EnabledKeys, &out.OverQuotaKeys, &out.ExpiredKeys)
 	if err != nil {

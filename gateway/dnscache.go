@@ -5,12 +5,7 @@ import (
 	"time"
 )
 
-// dnsCache remembers, for each resolved IPv4 address, which hostnames it
-// answered for, so the gateway can classify SNI-less TCP connections by
-// their destination IP against the site policy. Entries carry an expiry from
-// the DNS reply's TTL (bounded by dnsMinTTLEntry/dnsMaxTTLEntry) and are
-// pruned lazily when the map grows, so a long-lived tunnel never leaks
-// memory or classifies an old IP with a fresh resolution.
+// dnsCache maps resolved IPv4 addresses back to hostnames so SNI-less TCP connections can be classified against the site policy; entries expire from the reply's TTL.
 type dnsCache struct {
 	mu        sync.Mutex
 	ipDomains map[string]map[string]struct{}
@@ -44,8 +39,6 @@ func (c *dnsCache) record(records []dnsARecord) {
 	c.pruneLocked()
 }
 
-// lookup returns the domains cached for ip, dropping any that have expired
-// along the way.
 func (c *dnsCache) lookup(ip string) []string {
 	if c == nil {
 		return nil
@@ -68,8 +61,6 @@ func (c *dnsCache) lookup(ip string) []string {
 	return out
 }
 
-// pruneLocked removes expired entries once the cache outgrows a fixed size,
-// keeping it from growing unbounded on busy devices.
 func (c *dnsCache) pruneLocked() {
 	if len(c.expiry) <= 8192 {
 		return

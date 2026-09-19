@@ -170,9 +170,6 @@ func TestSitePolicyIPEntries(t *testing.T) {
 }
 
 func TestSitePolicyLightFiltering(t *testing.T) {
-	// The Go side only filters what would be structurally impossible to
-	// match (schemes/paths/whitespace). Deeper validation happens in the
-	// Android UI before a value ever reaches the policy.
 	p := NewSitePolicy(SiteSplitExclude, []string{"http://example.com", "exa mple.com", "example.com/path", "*.ru"})
 	want := []string{"ru"}
 	if len(p.sites) != 1 || p.sites[0] != want[0] {

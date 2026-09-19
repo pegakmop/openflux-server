@@ -47,9 +47,6 @@ func TestNewServerNormalizesDNSUpstream(t *testing.T) {
 // --- relayUDP: exercises the generic (non-DNS) UDP relay path -----------
 
 func TestRelayUDPBidirectional(t *testing.T) {
-	// A real local UDP server standing in for whatever relayUDP dials via
-	// Dialer.DialUDP - echoes each datagram back with a prefix so the test
-	// can tell a reply actually round-tripped through the relay.
 	echoConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listen: %v", err)

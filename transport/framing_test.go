@@ -61,8 +61,6 @@ func TestBatchRoundTripEmptyList(t *testing.T) {
 	}
 }
 
-// A compressible batch must actually use the compressed path and shrink,
-// proving zstd is wired in (not just a raw passthrough).
 func TestBatchCompressesRepetitiveData(t *testing.T) {
 	pkt := bytes.Repeat([]byte("ABCDEFGH"), 512) // 4096 bytes, highly compressible
 	pkts := [][]byte{pkt, pkt, pkt}
@@ -78,8 +76,6 @@ func TestBatchCompressesRepetitiveData(t *testing.T) {
 	assertBatchRoundTrip(t, pkts)
 }
 
-// Incompressible data must fall back to the uncompressed path and still
-// round-trip (zstd would otherwise inflate it).
 func TestBatchIncompressibleFallsBackAndRoundTrips(t *testing.T) {
 	pkt := make([]byte, 1200)
 	if _, err := rand.Read(pkt); err != nil {
@@ -95,8 +91,6 @@ func TestDecodeBatchRejectsUnknownVersion(t *testing.T) {
 }
 
 func TestDecodeBatchRejectsTruncatedLengthPrefix(t *testing.T) {
-	// valid header, flags=0 (uncompressed), then a length prefix claiming 10
-	// bytes but only 2 present.
 	bad := []byte{batchFormatVersion, 0x00, 0x00, 0x0A, 0x01, 0x02}
 	if _, err := DecodeBatch(bad); err == nil {
 		t.Fatal("expected error for truncated length-prefixed packet")

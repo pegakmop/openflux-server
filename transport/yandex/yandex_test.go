@@ -19,8 +19,6 @@ import (
 
 // --- Send ---------------------------------------------------------------
 
-// A session with an existing WriteQueue (mid-reconnect) must still accept
-// Send even while IsConnected() is false; only "no session at all" should fail.
 func TestSendQueuesEvenWhileDisconnected(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.session = &DocSession{WriteQueue: make(chan []byte, 4)}
@@ -117,8 +115,6 @@ func TestHandleMessageUnbatchesMultiPacketPayload(t *testing.T) {
 	}
 }
 
-// A payload with no batchMarker byte (legacy peer) must still be delivered
-// as a single unsplit packet.
 func TestHandleMessageStillHandlesUnbatchedLegacyPayload(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -209,8 +205,46 @@ func TestWriterLoopBatchesMultiplePacketsIntoOneMessage(t *testing.T) {
 	}
 }
 
-// Without proof the peer understands batchMarker, packets must go out one
-// per message.
+// writerLoop must not drain a queued backlog before IsConnected() is true (regression: see connectToDoc).
+func TestWriterLoopWaitsForConnectedBeforeDraining(t *testing.T) {
+	received := make(chan []byte, 1)
+	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		received <- msg
+	})
+	defer srv.Close()
+
+	conn := dialTestServer(t, srv)
+	defer conn.Close()
+
+	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
+	if err := tr.BaseTransport.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	queue := make(chan []byte, 10)
+	tr.session = &DocSession{Conn: conn, WriteQueue: queue}
+	queue <- []byte("queued-before-auth")
+
+	go tr.writerLoop(queue)
+
+	select {
+	case msg := <-received:
+		t.Fatalf("writerLoop sent %q before IsConnected() was ever true", msg)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	tr.SetConnected(true)
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("writerLoop never drained the queue after IsConnected() became true")
+	}
+}
+
 func TestWriterLoopDoesNotBatchByDefault(t *testing.T) {
 	received := make(chan []byte, 10)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -276,8 +310,6 @@ func TestHandleMessageLearnsPeerBatchingFromKeepalive(t *testing.T) {
 	}
 }
 
-// A keepalive carrying only the older kaBatchCapabilityToken must not set
-// peerZstdBatches.
 func TestHandleMessageLearnsZstdBatchCapabilityFromKeepalive(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 
@@ -301,12 +333,6 @@ func TestHandleMessageLearnsZstdBatchCapabilityFromKeepalive(t *testing.T) {
 			tr2.peerBatches.Load(), tr2.peerZstdBatches.Load())
 	}
 }
-
-// --- EnableSelfCompression -------------------------------------------------
-//
-// With self-compression enabled but the peer's capability not yet proven,
-// wire bytes must be byte-for-byte identical to the old external
-// transport.CompressedTransport wrapper's output.
 
 func TestSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	received := make(chan []byte, 10)
@@ -354,8 +380,6 @@ func TestSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	}
 }
 
-// With only the older kaBatchCapabilityToken learned, must match
-// per-packet-compress-then-legacy-batch behavior exactly.
 func TestSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -469,8 +493,6 @@ func TestSelfCompressUsesZstdBatchOnceBothTokensConfirmed(t *testing.T) {
 	}
 }
 
-// A self-compressing transport must hand raw packets straight to
-// CallReceive from a zstd-batch frame (EncodeBatch's payload is already raw).
 func TestHandleMessageSelfCompressDecodesZstdBatch(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableSelfCompression()
@@ -489,9 +511,6 @@ func TestHandleMessageSelfCompressDecodesZstdBatch(t *testing.T) {
 	}
 }
 
-// A self-compressing transport talking to an old peer must decompress
-// transport.Compress'd bytes itself, since there's no external
-// CompressedTransport left to do it.
 func TestHandleMessageSelfCompressDecodesLegacySingleAndBatch(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableSelfCompression()
@@ -526,12 +545,6 @@ func TestNewYandexDocsTransportDefaultsToNotSelfCompressing(t *testing.T) {
 	}
 }
 
-// --- EnableEncryptedSelfCompression ------------------------------------
-//
-// The legacy fallback's batchMarker is NOT itself encrypted (only each item
-// inside it is), while the new format and old single-item fallback are
-// fully opaque ciphertext until decrypted.
-
 func TestHandleMessageLearnsEncSelfCompressCapabilityFromKeepalive(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.handleMessage(nil, []byte(`42["message",{"type":"cursor","cursor":"18;---KA---`+kaBatchCapabilityToken+kaZstdBatchCapabilityToken+kaEncSelfCompressToken+`"}]`))
@@ -546,8 +559,6 @@ func TestHandleMessageLearnsEncSelfCompressCapabilityFromKeepalive(t *testing.T)
 	}
 }
 
-// A plain self-compressing transport's keepalive must not contain
-// kaEncSelfCompressToken, or a peer would wrongly expect ciphertext.
 func TestKeepAliveOnlySendsEncTokenWhenEncrypted(t *testing.T) {
 	plain := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	plain.EnableSelfCompression()
@@ -562,8 +573,6 @@ func TestKeepAliveOnlySendsEncTokenWhenEncrypted(t *testing.T) {
 	}
 }
 
-// Before the peer's capability is known, wire bytes must match
-// transport.Seal(transport.Compress(raw)) exactly.
 func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) {
 	received := make(chan []byte, 10)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -603,8 +612,6 @@ func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) 
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		// send is c2s (client role); decrypting with it stands in for "can
-		// an unmodified exit-node peer decrypt this".
 		plain, err := transport.Open(send, decoded)
 		if err != nil {
 			t.Fatalf("an unmodified peer (deriving the same key) must be able to decrypt this: %v", err)
@@ -618,10 +625,6 @@ func TestEncryptedSelfCompressReproducesLegacySingleFormatExactly(t *testing.T) 
 	}
 }
 
-// With kaBatchCapabilityToken confirmed but not kaEncSelfCompressToken,
-// packets go out as a batchMarker-wrapped batch of independently
-// encrypted+compressed items - batchMarker itself stays unencrypted so an
-// unmodified peer can still un-batch before decrypting each item.
 func TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -684,8 +687,6 @@ func TestEncryptedSelfCompressReproducesLegacyBatchFormatExactly(t *testing.T) {
 	}
 }
 
-// Once the peer confirms encrypted self-compression, the whole batch is
-// encrypted as one unit with no visible structure (not even batchMarker).
 func TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed(t *testing.T) {
 	received := make(chan []byte, 1)
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
@@ -755,8 +756,6 @@ func TestEncryptedSelfCompressUsesEncryptedZstdBatchOnceConfirmed(t *testing.T) 
 	}
 }
 
-// Covers both shapes an unmodified peer's messages can take: a single item,
-// and a batchMarker-wrapped batch of individually encrypted items.
 func TestHandleEncryptedMessageDecodesLegacySingleAndBatch(t *testing.T) {
 	const token = "shared-secret-token"
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
@@ -815,8 +814,7 @@ func TestHandleEncryptedMessageDecodesNewFormat(t *testing.T) {
 	}
 }
 
-// Security-critical: anything that fails to decrypt must be dropped, never
-// passed to CallReceive as if it were valid plaintext.
+// Security-critical: anything that fails to decrypt must be dropped, never passed to CallReceive as if it were valid plaintext.
 func TestHandleEncryptedMessageDropsUndecryptableData(t *testing.T) {
 	tr := NewYandexDocsTransport("http://unused.invalid", transport.DefaultConfig())
 	tr.EnableEncryptedSelfCompression("shared-secret-token", true)
@@ -850,8 +848,6 @@ func TestNormalizeDocURLRewritesDiskShareLinks(t *testing.T) {
 		"https://DISK.YANDEX.RU/i/CaseInsensitiveHost": "https://docs.yandex.ru/i/CaseInsensitiveHost",
 		// Already a docs.yandex.ru link - must pass through byte-for-byte.
 		"https://docs.yandex.ru/docs/edit?url=abc": "https://docs.yandex.ru/docs/edit?url=abc",
-		// A disk.yandex.ru path that isn't a /i/ share link - left alone
-		// for the actual HTTP fetch to accept or reject, not guessed at.
 		"https://disk.yandex.ru/d/FolderShareLink": "https://disk.yandex.ru/d/FolderShareLink",
 		// Malformed - returned unchanged rather than dropped.
 		"not a url at all": "not a url at all",
@@ -879,9 +875,6 @@ func TestBackoffDelayGrowsAndCaps(t *testing.T) {
 		MaxReconnectDelay:   1 * time.Second,
 	})
 
-	// backoffDelay adds up to +50% jitter (see its doc comment), so each
-	// uncapped value is checked as a range [base, base*1.5] rather than an
-	// exact figure.
 	assertInJitterRange(t, tr.backoffDelay(0), 100*time.Millisecond)
 	assertInJitterRange(t, tr.backoffDelay(1), 200*time.Millisecond)
 	assertInJitterRange(t, tr.backoffDelay(2), 400*time.Millisecond)
@@ -921,8 +914,6 @@ func TestScheduleReconnectEmitsRetryingEvent(t *testing.T) {
 	var gotCode, gotDetail string
 	tr.SetEventCallback(func(code, detail string) {
 		gotCode, gotDetail = code, detail
-		// Stop the transport so scheduleReconnect's post-sleep IsRunning
-		// check bails out instead of actually redialing unused.invalid.
 		tr.Stop()
 	})
 
@@ -1054,8 +1045,6 @@ func TestFetchDocInfoValidConfig(t *testing.T) {
 		t.Errorf("WsURL = %q, want it to contain the doc key", info.WsURL)
 	}
 
-	// A request with only a bare User-Agent isn't a shape any real browser
-	// produces - itself a bot-detection signal.
 	if ua := gotHeaders.Get("User-Agent"); ua != browserUserAgent {
 		t.Errorf("User-Agent = %q, want %q", ua, browserUserAgent)
 	}
@@ -1071,9 +1060,6 @@ func TestFetchDocInfoValidConfig(t *testing.T) {
 
 var upgrader = websocket.Upgrader{}
 
-// serveHandshakeServer spins up a real WS server playing the
-// Yandex/OnlyOffice side of the engine.io/socket.io handshake; respond
-// drives what it sends/expects for a given test.
 func serveHandshakeServer(t *testing.T, respond func(conn *websocket.Conn)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1106,8 +1092,7 @@ func TestPerformHandshakeSuccessWaitsForAck(t *testing.T) {
 		open, _ := json.Marshal(map[string]int{"pingInterval": 25000, "pingTimeout": 5000})
 		conn.WriteMessage(websocket.TextMessage, append([]byte("0"), open...))
 
-		// 2. Must receive the namespace-connect BEFORE sending the ack -
-		// this is exactly the ordering the original bug violated.
+		// Must receive the namespace-connect BEFORE sending the ack - this is exactly the ordering the original bug violated.
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Errorf("server read: %v", err)
@@ -1128,8 +1113,6 @@ func TestPerformHandshakeSuccessWaitsForAck(t *testing.T) {
 			t.Errorf("namespace-connect token = %q, want %q", payload.Token, token)
 		}
 
-		// A mid-handshake ping - the client must answer it without
-		// mistaking it for the ack and without giving up.
 		conn.WriteMessage(websocket.TextMessage, []byte("2"))
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, pong, err := conn.ReadMessage()
@@ -1185,9 +1168,6 @@ func TestPerformHandshakeFailsOnConnectError(t *testing.T) {
 }
 
 func TestPerformHandshakeDoesNotSendConnectBeforeOpen(t *testing.T) {
-	// If the client sent its namespace-connect before the server's open
-	// packet arrived, this handler would see it as the very first frame
-	// and fail the test - reproducing the original race directly.
 	srv := serveHandshakeServer(t, func(conn *websocket.Conn) {
 		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 		if _, _, err := conn.ReadMessage(); err == nil {

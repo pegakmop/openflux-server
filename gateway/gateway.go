@@ -1,8 +1,4 @@
-// Package gateway turns a raw TUN file descriptor (as handed out by
-// Android's VpnService, or any other source of whole IP packets) into TCP
-// connections dialed through a Dialer - the same role socks5.SOCKS5Server
-// plays for desktop clients, but for callers that hand over raw device
-// traffic instead of SOCKS5 CONNECT requests.
+// Package gateway turns a raw TUN file descriptor into TCP connections dialed through a Dialer, the same role socks5.SOCKS5Server plays for desktop clients.
 package gateway
 
 import (
@@ -28,54 +24,25 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-// Dialer is satisfied by *tunnel.TCPTunnel: it dials an arbitrary
-// destination out through whatever covert transport that tunnel wraps.
 type Dialer interface {
 	DialTCP(address string) (net.Conn, error)
 	DialUDP(address string) (net.Conn, error)
 }
 
-// udpIdleTimeout closes a relayed UDP flow after this long without a
-// datagram in either direction - UDP has no FIN/close signal of its own, so
-// without this a flow whose local app simply stops sending (rather than
-// tearing down its socket) would relay forever.
+// udpIdleTimeout closes a relayed UDP flow after this long idle, since UDP has no FIN/close signal of its own.
 const udpIdleTimeout = 60 * time.Second
 
 const gatewayNIC = tcpip.NICID(1)
 
-// Server runs a gvisor stack in transparent-proxy mode: its one NIC accepts
-// packets addressed to any destination (promiscuous + spoofing, the
-// standard gvisor-as-tun2socks pattern), intercepts new TCP connections and
-// UDP flows via forwarders, and relays each one through Dialer - DNS
-// (UDP/53) gets its own request/response framing (see relayDNS), everything
-// else gets a generic bidirectional datagram relay (see relayUDP). Any IPv6
-// (this stack only registers ipv4) is left unhandled, which fails closed
-// rather than leaking outside the tunnel.
+// Server runs a gvisor stack in transparent-proxy mode; any IPv6 (unregistered) is left unhandled, failing closed rather than leaking outside the tunnel.
 type Server struct {
-	dialer Dialer
-	// dnsUpstreamCfg is the constructor's dnsUpstream argument, parsed once
-	// - see parseDNSUpstream for the tls://.../https://... forms
-	// relayDNS's queryUpstream understands on top of a plain host:port.
-	dnsUpstreamCfg dnsUpstreamConfig
-	// dnsUpstreamTLSConfig is queryDoT/queryDoH's TLS config (nil, meaning
-	// "use the plain path", unless dnsUpstreamCfg is DoT/DoH). A field
-	// rather than built inline so a test can substitute one with
-	// InsecureSkipVerify for a local test server instead of needing a
-	// certificate the system trust store actually recognizes.
+	dialer               Dialer
+	dnsUpstreamCfg       dnsUpstreamConfig
 	dnsUpstreamTLSConfig *tls.Config
 	directDialer         *net.Dialer
 
-	// sitePolicy, when enabled (see SitePolicy.Enabled), routes TCP
-	// connections and DNS queries for matching sites around the tunnel -
-	// dialing them straight from the device instead. dnsCache maps resolved
-	// A records back to their hostnames so SNI-less connections can still be
-	// classified by destination IP.
-	sitePolicy *SitePolicy
-	dnsCache   *dnsCache
-	// directResolvers are the resolvers dnsQueryDirect uses for DNS that
-	// must go around the tunnel, first match wins. Populated by default with
-	// the configured upstream plus the transport package's bootstrap
-	// resolvers; tests override it with a local stub.
+	sitePolicy      *SitePolicy
+	dnsCache        *dnsCache
 	directResolvers []string
 
 	gvisorStack *stack.Stack
@@ -83,18 +50,10 @@ type Server struct {
 	closed      atomic.Bool
 }
 
-// NewServer builds a gateway that relays through dialer. dnsUpstream is the
-// host (optionally host:port, defaulting to :53) of the DNS-over-TCP
-// resolver used for intercepted DNS queries; it is dialed through the same
-// Dialer, so resolution goes through the tunnel like everything else. The
-// site policy is disabled (everything tunnels).
 func NewServer(dialer Dialer, dnsUpstream string) *Server {
 	return NewServerWithPolicy(dialer, dnsUpstream, nil)
 }
 
-// NewServerWithPolicy builds a gateway with the site-level split-tunneling
-// policy. nil works like SiteSplitOff without the per-connection sniffing
-// overhead.
 func NewServerWithPolicy(dialer Dialer, dnsUpstream string, policy *SitePolicy) *Server {
 	cfg := parseDNSUpstream(dnsUpstream)
 	return &Server{
@@ -108,15 +67,7 @@ func NewServerWithPolicy(dialer Dialer, dnsUpstream string, policy *SitePolicy) 
 	}
 }
 
-// defaultDirectResolvers builds the resolver list for DNS queries that must
-// bypass the tunnel: the profile's own upstream first (a LAN DNS resolves
-// local/intranet sites the tunnel's configured resolver wouldn't), then the
-// well-known public resolvers the transport itself uses to bootstrap, so a
-// bypassed query keeps working even if the upstream only answers on the
-// tunneled side. dnsQueryDirect only ever speaks plain UDP/TCP:53 (see its
-// own doc comment - it's for sites that go around the tunnel entirely, not
-// through it), so a DoT/DoH upstream contributes nothing usable here and is
-// skipped in favor of the plain bootstrap resolvers alone.
+// defaultDirectResolvers combines the profile's own upstream with the transport's bootstrap resolvers, since dnsQueryDirect only ever speaks plain UDP/TCP:53.
 func defaultDirectResolvers(upstream dnsUpstreamConfig) []string {
 	var out []string
 	seen := make(map[string]struct{})
@@ -139,11 +90,6 @@ func defaultDirectResolvers(upstream dnsUpstreamConfig) []string {
 	return out
 }
 
-// Start wires up the gvisor stack and begins pumping packets: tunReader is
-// read in a background goroutine (one raw IP packet per Read, matching a
-// TUN device's framing) and injected into the stack; packets the stack
-// wants to emit are written to tunWriter. Start returns once the stack is
-// ready; the pump and per-connection relays keep running until Close.
 func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	s.gvisorStack = stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
@@ -167,11 +113,7 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	if err := s.gvisorStack.SetSpoofing(gatewayNIC, true); err != nil {
 		return fmt.Errorf("enable spoofing: %v", err)
 	}
-	// Promiscuous+spoofing gets an incoming packet accepted with no address
-	// of its own on the NIC, but a route is still what tells the stack
-	// which NIC to send a *reply* out of - without one, gvisor has nowhere
-	// to route the SYN-ACK, CreateEndpoint's handshake fails, and nothing
-	// downstream (the dialer, the actual tunnel) ever sees a single byte.
+	// Promiscuous+spoofing lets an incoming packet be accepted with no local address, but a route is still what tells gvisor which NIC to send the SYN-ACK reply out of.
 	s.gvisorStack.AddRoute(tcpip.Route{
 		Destination: header.IPv4EmptySubnet,
 		NIC:         gatewayNIC,
@@ -188,9 +130,7 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	return nil
 }
 
-// Close tears the gateway's gvisor stack down. It does not close
-// tunReader/tunWriter - the caller owns that file's lifecycle (in the
-// mobile package, the TUN fd handed in from Android).
+// Close does not close tunReader/tunWriter - the caller owns that file's lifecycle.
 func (s *Server) Close() {
 	s.closed.Store(true)
 	if s.gvisorStack != nil {
@@ -276,11 +216,7 @@ func (s *Server) relayTCP(localConn net.Conn, dest string) {
 	wg.Wait()
 }
 
-// relayDirect bridges a connection straight out of the device, bypassing the
-// tunnel - the "site split" path for selected domains. It dials the
-// destination IP with the transport's protected dialer so the socket is
-// exempted from the Android VPN and can't be re-captured by the very tunnel
-// it's supposed to go around.
+// relayDirect dials the destination with the transport's protected dialer so the bypass socket can't be re-captured by the tunnel it's meant to go around.
 func (s *Server) relayDirect(localConn net.Conn, dest string) {
 	remoteConn, err := s.directDialer.Dial("tcp", dest)
 	if err != nil {
@@ -306,13 +242,7 @@ func (s *Server) relayDirect(localConn net.Conn, dest string) {
 	wg.Wait()
 }
 
-// shouldBypassConnection decides whether a fresh TCP connection goes around
-// the tunnel, gathering every identity the policy can work with: the TLS SNI
-// sniffed off the connection's head, the destination IP itself (matches IP
-// rules), and the DNS cache's reverse mapping of that IP (covers SNI-less
-// traffic that resolved through the gateway). Behaviour with no signal at
-// all defers to the policy mode's default (tunnel for EXCLUDE, direct for
-// INCLUDE). Ambiguity is resolved toward the tunnel inside the policy.
+// shouldBypassConnection checks SNI, destination IP, and the DNS cache's reverse mapping; ambiguity always resolves toward the tunnel.
 func (s *Server) shouldBypassConnection(peeked []byte, dest string) bool {
 	var candidates []string
 	if domain := sniServerName(peeked); domain != "" {
@@ -325,8 +255,6 @@ func (s *Server) shouldBypassConnection(peeked []byte, dest string) bool {
 	return s.sitePolicy.ShouldBypassDest(host, candidates)
 }
 
-// connectionLabel names a connection for log lines: the SNI if it was
-// sniffed, otherwise whatever the DNS cache knows, otherwise the raw dest.
 func (s *Server) connectionLabel(peeked []byte, dest string) string {
 	if domain := sniServerName(peeked); domain != "" {
 		return domain
@@ -341,12 +269,6 @@ func (s *Server) connectionLabel(peeked []byte, dest string) string {
 	return dest
 }
 
-// handleUDP accepts every UDP flow: port 53 (DNS) gets the request/response
-// framing in relayDNS, everything else gets a generic bidirectional relay
-// in relayUDP. gvisor's forwarder creates one "connected" endpoint per
-// distinct 5-tuple (its peer fixed to whoever sent the first datagram) and
-// keeps delivering that flow's later datagrams to the same endpoint, so
-// relayUDP can treat it like any other long-lived connection.
 func (s *Server) handleUDP(r *udp.ForwarderRequest) bool {
 	id := r.ID()
 
@@ -368,10 +290,7 @@ func (s *Server) handleUDP(r *udp.ForwarderRequest) bool {
 	return true
 }
 
-// relayUDP bridges one local UDP flow to dest through the tunnel, copying
-// datagrams in both directions until either side errors, closes, or goes
-// silent for longer than udpIdleTimeout - see that constant's doc comment
-// for why a timeout is needed at all for a protocol with no close signal.
+// relayUDP bridges a flow through the tunnel until either side errors, closes, or goes silent past udpIdleTimeout.
 func (s *Server) relayUDP(localConn net.Conn, dest string) {
 	defer localConn.Close()
 
@@ -399,9 +318,7 @@ func (s *Server) relayUDP(localConn net.Conn, dest string) {
 	wg.Wait()
 }
 
-// copyDatagrams relays src -> dst one datagram per Read/Write, resetting
-// src's read deadline after every datagram - unlike io.Copy, this is what
-// lets an idle (not closed) flow time out instead of relaying forever.
+// copyDatagrams resets the read deadline after every datagram, unlike io.Copy, so an idle (not closed) flow can time out.
 func copyDatagrams(dst, src net.Conn) {
 	buf := make([]byte, 65535)
 	for {

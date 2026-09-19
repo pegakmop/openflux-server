@@ -25,15 +25,7 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-// VolgaConfig tunes YandexVolgaTransport - a second, higher-throughput way
-// to speak the same disguise (a real Yandex Docs/Disk collaborative
-// session), built on volga.yandex.ru's own send path instead of the
-// engine.io/socket.io one YandexDocsTransport emulates. Sends batch into
-// one HTTP POST per worker instead of one WebSocket frame per packet;
-// receives stay on a WebSocket (push.yandex.ru) since that's how the real
-// client gets pushed updates. Defaults are sized for a single mobile
-// client, not the many-thousand-connection server the original tuning
-// numbers this was adapted from assumed.
+// VolgaConfig tunes a second, higher-throughput way to speak the same Yandex disguise: batched HTTP POSTs for sending, a WebSocket for receiving; defaults are sized for one mobile client, not the original many-thousand-connection server.
 type VolgaConfig struct {
 	MaxIdleConnsPerHost int
 	MaxIdleConns        int
@@ -84,17 +76,12 @@ func DefaultVolgaConfig() VolgaConfig {
 	}
 }
 
-// Reason codes for this transport's transport.EventRetrying - see
-// scheduleReconnect in yandex.go for the shared detail format.
 const (
 	volgaReasonAuthFailed   = "auth_failed"
 	volgaReasonWSDialFailed = "ws_dial_failed"
 	volgaReasonWSReadError  = "ws_read_error"
 )
 
-// volgaUserAgent shares browserUserAgent (see browser_ua.go) rather than a
-// separately hardcoded fingerprint, so every HTTP/WS request across this
-// package presents the same, currently-real browser identity.
 const volgaUserAgent = browserUserAgent
 
 var reClientConfig = regexp.MustCompile(`<script[^>]*id="client-config"[^>]*>(.*?)</script>`)
@@ -154,10 +141,6 @@ type volgaAuth struct {
 	Cookies     []*http.Cookie
 }
 
-// authorize replays the browser flow that turns a Yandex Docs/Disk share
-// link into a Volga session: follow redirects to the doc viewer, pull the
-// embedded client-config for an access token, exchange that for a session
-// (token/request-path/xiva push credentials) via the auth redirect dance.
 func authorize(docURL string) (*volgaAuth, error) {
 	utils.Debugf("[VOLGA] authorize(%s)", docURL)
 
@@ -418,9 +401,6 @@ func mapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// relayClient is the send side: packets are length-prefixed, batched, and
-// base64'd into a single Volga "relay" HTTP POST per batch, spread across a
-// small worker pool instead of one request per packet.
 type relayClient struct {
 	auth   *volgaAuth
 	config VolgaConfig
@@ -559,8 +539,6 @@ func (r *relayClient) worker() {
 	}
 }
 
-// sendBatch packs a batch as [len,data]... frames, base64s it into a fake
-// text-insert edit (the disguise), and POSTs it as one Volga relay op.
 func (r *relayClient) sendBatch(batch [][]byte) error {
 	blob := blobBufPool.Get().(*bytes.Buffer)
 	blob.Reset()
@@ -672,11 +650,7 @@ func (r *relayClient) sendBatch(batch [][]byte) error {
 	return nil
 }
 
-// markSent/wasRecentlySent dedup a whole sent batch's raw blob so wsListener
-// can recognize its own traffic bounced back through push.yandex.ru's
-// broadcast and drop it. inner.UserID can't do this: on an anonymous,
-// no-login share link Yandex can hand every viewer the same guest identity,
-// so a CRC32 of the actual bytes is used instead.
+// markSent/wasRecentlySent dedup by CRC32 of the raw bytes rather than inner.UserID, since an anonymous share link can hand every viewer the same guest identity.
 func (r *relayClient) markSent(data []byte) {
 	h := crc32.ChecksumIEEE(data)
 	now := time.Now()
@@ -722,9 +696,6 @@ func (r *relayClient) getFrontier() []interface{} {
 	return []interface{}{r.frontier}
 }
 
-// wsListener is the receive side: a push.yandex.ru WebSocket subscription
-// that gets the other party's bundles pushed to it, with its own
-// exponential-backoff reconnect independent of the send side's HTTP pool.
 type wsListener struct {
 	auth   *volgaAuth
 	config VolgaConfig
@@ -733,14 +704,7 @@ type wsListener struct {
 	onData func([]byte)
 	emit   func(code, detail string)
 
-	// recentRecvMu/recentRecv dedup inbound batches by content hash, the
-	// receive-side twin of relayClient's recentSent/wasRecentlySent. The WS
-	// subscribe URL's fetch_history=...:volga:0:1 param (see connect)
-	// replays the last message on every single reconnect - harmless if the
-	// connection genuinely dropped before that message was ever delivered,
-	// but a real double-delivery (and double count towards BytesReceived)
-	// whenever it wasn't, which given how often Volga has needed to
-	// reconnect is not a rare edge case.
+	// The WS subscribe URL's fetch_history param replays the last message on every reconnect, so recentRecvMu/recentRecv dedup inbound batches by content hash to avoid a real double-delivery.
 	recentRecvMu sync.Mutex
 	recentRecv   map[uint32]time.Time
 
@@ -797,9 +761,7 @@ func (w *wsListener) run() {
 		if strings.HasPrefix(err.Error(), "dial:") {
 			reason = volgaReasonWSDialFailed
 		}
-		// w.emit (BaseTransport.EmitEvent) is a silent no-op unless
-		// SetEventCallback was called - never true on the exit node, so this
-		// debug log is the only visibility into a WS connect/read failure there.
+		// w.emit is a silent no-op unless SetEventCallback was set - never true on the exit node - so this debug log is the only visibility into a WS connect/read failure there.
 		utils.Debugf("[VOLGA] WS %s (attempt %d): %v", reason, attempt, err)
 		w.emit(transport.EventRetrying, fmt.Sprintf("%d|%d|%s|%s", attempt, int(delay.Seconds()), reason, err.Error()))
 
@@ -853,11 +815,7 @@ func (w *wsListener) connect(attempt int) error {
 	w.emit(transport.EventConnected, strconv.Itoa(attempt))
 	utils.Debugf("[VOLGA] WS connected: user=%s", w.auth.UserIDStr)
 
-	// This connection is receive-only from our side (push.yandex.ru pushes
-	// to us, nothing to write back), so with zero outbound traffic a
-	// NAT/firewall can decide it's idle and drop it - surfacing as
-	// ReadMessage returning "websocket: close 1005 (no status)". A periodic
-	// ping keeps traffic flowing so nothing on the path considers it idle.
+	// This connection is receive-only from our side, so a periodic ping keeps a NAT/firewall from deciding zero outbound traffic means idle and dropping it.
 	pingDone := make(chan struct{})
 	defer close(pingDone)
 	go func() {
@@ -923,11 +881,7 @@ func (w *wsListener) handleMessage(raw []byte) {
 		return
 	}
 
-	// inner.UserID is not used to drop self-echo here: on an anonymous,
-	// no-login share link both sides of the tunnel can get the same guest
-	// UserID, which would drop 100% of the peer's real traffic too.
-	// Self-echo is instead caught downstream by content hash (see
-	// relayClient.wasRecentlySent).
+	// inner.UserID can't drop self-echo here since an anonymous share link can give both tunnel ends the same guest UserID; self-echo is instead caught by content hash.
 	switch inner.T {
 	case "relay":
 		w.handleRelayMessage(inner.Message)
@@ -967,9 +921,6 @@ func (w *wsListener) handleBundle(raw json.RawMessage) {
 	}
 }
 
-// markReceived/wasRecentlyReceived dedup inbound batches by content hash -
-// see the doc comment on wsListener.recentRecv for why this is needed
-// (fetch_history replaying the last message on every reconnect).
 func (w *wsListener) markReceived(data []byte) {
 	h := crc32.ChecksumIEEE(data)
 	now := time.Now()
@@ -1055,10 +1006,6 @@ func decodeBatch(decoded []byte) [][]byte {
 	return packets
 }
 
-// YandexVolgaTransport is transport.Transport over volga.yandex.ru: same
-// disguise family as YandexDocsTransport, but batched HTTP POSTs for
-// sending instead of one WebSocket frame per packet - higher throughput,
-// at the cost of a little latency per batch (see BatchTimeout).
 type YandexVolgaTransport struct {
 	*transport.BaseTransport
 
@@ -1164,13 +1111,7 @@ func (t *YandexVolgaTransport) Stats() transport.TransportStats {
 	}
 }
 
-// statsLoop is the only thing that would have shown "sends fine, never
-// receives anything" as it's actually happening rather than after the fact:
-// a periodic per-second send/recv rate, independent of whether the WS
-// listener ever logs a connect/read failure at all (it could be connected
-// the whole time and simply never get pushed a message - see handleMessage/
-// handleBundleItem's silent-drop paths). Runs until keepAliveStop closes,
-// same lifecycle as keepAliveLoop.
+// statsLoop is the only thing that shows "sends fine, never receives" as it happens, since the WS listener can be connected the whole time and simply never get pushed a message.
 func (t *YandexVolgaTransport) statsLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

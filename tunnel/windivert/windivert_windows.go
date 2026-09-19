@@ -108,8 +108,7 @@ func (e *Endpoint) readLoop() {
 		flags := tcpHdr[13]
 
 		if addr.Outbound() {
-			// A RST from the Windows stack for a port gVisor owns must be
-			// dropped, not passed through - it isn't gVisor's own connection to reset.
+			// A RST from the Windows stack for a port gVisor owns must be dropped, not passed through - it isn't gVisor's own connection to reset.
 			if flags&0x04 != 0 {
 				if _, ok := e.gvisorPorts.Load(srcPort); ok {
 					e.rstDropped.Add(1)
@@ -128,8 +127,6 @@ func (e *Endpoint) readLoop() {
 			continue
 		}
 
-		// Ours: hand a copy to gVisor but do not pass it through to the
-		// Windows stack (it's dropped from windivert's point of view).
 		pktCopy := make([]byte, len(pkt))
 		copy(pktCopy, pkt)
 

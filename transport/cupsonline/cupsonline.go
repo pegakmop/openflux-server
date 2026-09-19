@@ -66,8 +66,7 @@ func DefaultCupsonlineConfig() CupsonlineConfig {
 		ReconnectMultiplier: 1.3,
 		HTTPTimeout:         30 * time.Second,
 
-		// 32 KB — проверено probe'ом: column 49152 OK, 65536 CLOSED.
-		// 32 KB батч → ~43 KB base64 → push ~43 KB < 64 KB лимита.
+		// 32 KB — проверено: колонка 49152 OK, 65536 CLOSED; батч ~43 KB base64 остаётся < 64 KB лимита.
 		BatchMaxPackets: 64,
 		BatchMaxBytes:   32 * 1024,
 		BatchTimeout:    2 * time.Millisecond,
@@ -757,8 +756,7 @@ func (t *CupsonlineTransport) Stop() error {
 	return t.BaseTransport.Stop()
 }
 
-// Send — flow-hash: один TCP-flow всегда в один WS-канал.
-// Это гарантирует порядок внутри потока, Centrifugo сохраняет порядок push'ей.
+// Send — flow-hash: один TCP-flow всегда в один WS-канал, что сохраняет порядок пакетов.
 func (t *CupsonlineTransport) Send(data []byte) error {
 	if len(t.wss) == 0 {
 		return fmt.Errorf("no ws")

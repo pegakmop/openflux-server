@@ -9,12 +9,6 @@ import (
 	"universal-bypass-tool/transport"
 )
 
-// localNonLoopbackIP returns this machine's own non-loopback IPv4 address,
-// or "" if it has none. gvisor (like a real kernel) treats 127.0.0.0/8 as
-// martian on anything but an actual loopback interface and silently drops
-// it - a real destination is never in that range, so the test dials this
-// address rather than 127.0.0.1 to exercise the same path production
-// traffic actually takes.
 func localNonLoopbackIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -32,13 +26,6 @@ func localNonLoopbackIP() string {
 	return ""
 }
 
-// pipeTransport is a minimal transport.Transport wired directly to a peer
-// pipeTransport in memory, each direction delivered in order by its own
-// single-consumer goroutine (real Send calls can race each other; gvisor's
-// TCP needs one direction's packets to arrive in the order they were sent).
-// Enough to drive two real TCPTunnels against each other without a real
-// covert channel, exercising proxy mode's actual packet path end to end -
-// not just that it compiles.
 type pipeTransport struct {
 	peer *pipeTransport
 	out  chan []byte
@@ -75,12 +62,6 @@ func (p *pipeTransport) Stats() transport.TransportStats            { return tra
 func (p *pipeTransport) SetEventCallback(func(code, detail string)) {}
 func (p *pipeTransport) ForceReconnect()                            {}
 
-// TestExitModeProxyRelaysRealTCP drives a client TCPTunnel and an exit-node
-// TCPTunnel (ExitModeProxy) against each other over an in-memory transport
-// pipe, dialing a real local TCP listener through the client's DialTCP -
-// exercising proxy mode's actual point (tcp.NewForwarder terminates the flow
-// in gvisor, then a plain net.Dial reaches the real destination - no raw
-// socket) end to end, not just that it compiles.
 func TestExitModeProxyRelaysRealTCP(t *testing.T) {
 	ip := localNonLoopbackIP()
 	if ip == "" {

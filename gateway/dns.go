@@ -15,14 +15,7 @@ const (
 	maxDNSMessageSize = 65535
 )
 
-// relayDNS handles exactly one DNS query arriving on a "connected" UDP
-// endpoint (its peer is fixed to whichever app sent the original query).
-//
-// With a site policy enabled, a query whose QNAME is ruled out of the tunnel
-// is resolved directly (see resolveDirect) instead of through the tunnel, so
-// a bypassed site's DNS doesn't depend on the tunnel either. Every reply -
-// direct or tunneled - is fed to the DNS cache so later SNI-less TCP
-// connections can trade the destination IP back for a domain.
+// relayDNS answers a query directly (bypassing the tunnel) when site policy excludes it, and always feeds replies to the DNS cache for later SNI-less classification.
 func (s *Server) relayDNS(conn net.Conn) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(dnsQueryTimeout))
@@ -68,10 +61,6 @@ func (s *Server) recordDNS(reply []byte) {
 	}
 }
 
-// resolveDirect answers a DNS query by dialing the configured/local resolvers
-// directly out of the tunnel (via the protected dialer, so the attempt isn't
-// captured by the very VPN it's meant to route around), trying UDP/53 first
-// and DNS-over-TCP as a fallback. Returns nil if every resolver fails.
 func (s *Server) resolveDirect(query []byte) []byte {
 	for _, server := range s.directResolvers {
 		if reply, ok := s.dnsQueryDirect(server, query); ok {

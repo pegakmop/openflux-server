@@ -29,9 +29,6 @@ func ingestTokenFromContext(ctx context.Context) model.IngestToken {
 	return t
 }
 
-// withAdmin requires the bootstrap admin bearer token. There is exactly one
-// admin token (from config), so this is a constant-time string compare
-// rather than a DB lookup.
 func (a *App) withAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := auth.ExtractBearer(r)
@@ -84,9 +81,7 @@ func (a *App) withNodeToken(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// "me" lets a node address itself without needing to know its own
-		// generated ID up front; an explicit ID is still checked to guard
-		// against a node token being used against another node's path.
+		// "me" lets a node address itself without knowing its own generated ID up front; an explicit ID is still checked against the node token.
 		if pathID := r.PathValue("id"); pathID != "" && pathID != "me" && pathID != n.ID {
 			writeError(w, http.StatusForbidden, "node token does not match node id")
 			return
@@ -116,12 +111,7 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// ipRateLimiter is a minimal per-IP token bucket. It is intentionally
-// dependency-free and holds state only in memory: at controlplane's expected
-// scale (control traffic only, not tunneled data) an unbounded map of
-// recently-seen IPs is acceptable, but it does mean limits reset on restart
-// and are not shared across replicas - fine for blunting casual token
-// brute-forcing on /v1/resolve, not a substitute for a real WAF.
+// ipRateLimiter is dependency-free, in-memory only: limits reset on restart and aren't shared across replicas - enough to blunt casual brute-forcing, not a substitute for a real WAF.
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket

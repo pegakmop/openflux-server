@@ -1,11 +1,10 @@
-// Package nodeagent lets an exit-node process serve many keys at once,
-// picking up newly-added or newly-disabled keys from the openflux-control
-// service instead of being started with one fixed --url per process.
+// Package nodeagent lets an exit-node process serve many keys at once, picking up newly added/disabled keys from openflux-control instead of one fixed --url per process.
 package nodeagent
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -22,11 +21,7 @@ type Config struct {
 	PollInterval    time.Duration
 	UsageInterval   time.Duration
 	HeartbeatPeriod time.Duration
-	// ExitMode picks how every worker's TCPTunnel reaches the real
-	// internet - see tunnel.ExitMode. Defaults to tunnel.ExitModeRaw
-	// (DefaultConfig's zero value), matching every existing managed
-	// deployment's current behavior.
-	ExitMode tunnel.ExitMode
+	ExitMode        tunnel.ExitMode
 }
 
 func DefaultConfig(controlURL, nodeToken string) Config {
@@ -46,14 +41,10 @@ type worker struct {
 	docURL  string
 	portIdx int
 
-	// lastSent/lastRecv are the transport's cumulative byte counters as of
-	// the last usage report, so ReportUsage only sends the delta.
 	lastSent uint64
 	lastRecv uint64
 }
 
-// Orchestrator owns one worker (Transport + TCPTunnel) per active key
-// assigned to this node, keeping that set in sync with the control plane.
 type Orchestrator struct {
 	client *ControlClient
 	cfg    Config
@@ -71,30 +62,19 @@ func NewOrchestrator(cfg Config) *Orchestrator {
 	}
 }
 
-// portRangeBase/portRangeSize/portRangeMax divide the usable TCP port space
-// into fixed-size, non-overlapping blocks - see TCPTunnel.SetPortRange's
-// doc comment for why every worker on this node needs one of its own.
-// portRangeSize=256 leaves room for a generous number of concurrent
-// connections per key while still fitting roughly 250 concurrent workers
-// in the space below portRangeMax.
+// portRangeSize trades against portAllocator's ceiling on concurrent workers (~2015 at 32); raise only alongside lowering nodes.max_keys, since a range can't be resized once its worker is running.
 const (
 	portRangeBase = 1025
-	portRangeSize = 256
+	portRangeSize = 32
 	portRangeMax  = 65535
 )
 
-// portAllocator hands out disjoint [start, end] port ranges by index,
-// recycling an index once its worker stops. Zero value is ready to use.
 type portAllocator struct {
 	mu   sync.Mutex
 	next int
 	free []int
 }
 
-// alloc reserves the next free range, returning ok=false once the port
-// space is exhausted (roughly (portRangeMax-portRangeBase)/portRangeSize
-// concurrent workers) - the caller should treat that as "no capacity left
-// on this node right now" rather than a fatal error.
 func (p *portAllocator) alloc() (idx int, start, end uint16, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -112,9 +92,6 @@ func (p *portAllocator) alloc() (idx int, start, end uint16, ok bool) {
 	rangeStart := portRangeBase + idx*portRangeSize
 	rangeEnd := rangeStart + portRangeSize - 1
 	if rangeEnd > portRangeMax {
-		// Undo the reservation - this index isn't usable - without
-		// disturbing whichever source (free list or the running counter)
-		// it actually came from.
 		if fromFree {
 			p.free = append(p.free, idx)
 		} else {
@@ -131,8 +108,6 @@ func (p *portAllocator) release(idx int) {
 	p.free = append(p.free, idx)
 }
 
-// Run blocks until ctx is cancelled, driving the poll/usage/heartbeat loops
-// and tearing down every worker on exit.
 func (o *Orchestrator) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -166,10 +141,6 @@ func (o *Orchestrator) pollLoop(ctx context.Context) {
 	}
 }
 
-// workerStartStagger spaces out starting brand-new workers discovered in the
-// same reconcile pass - see reconcile's doc comment on why bursting them all
-// at once is worth avoiding even though each individual start is cheap and
-// non-blocking.
 const workerStartStagger = 150 * time.Millisecond
 
 func (o *Orchestrator) reconcile(ctx context.Context) {
@@ -210,13 +181,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	}
 	o.mu.Unlock()
 
-	// Staggered and outside o.mu: starting many keys' WebSocket transports at
-	// once (a cold start, or a queued-up control-plane hiccup) would burst
-	// dozens of near-simultaneous outbound connections from this one
-	// exit-node IP - a pattern that looks like the automated traffic
-	// providers' bot detection exists to catch (see fetchDocInfo's CAPTCHA
-	// handling). o.mu stays released during the wait so usageLoop/
-	// heartbeatLoop keep running against workers already up.
+	// Worker starts are staggered outside o.mu so a cold start doesn't burst dozens of near-simultaneous connections from one exit-node IP, which looks like bot traffic to the doc providers.
 	for i, k := range toStart {
 		if i > 0 {
 			select {
@@ -228,7 +193,12 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 
 		w, err := o.startWorker(k)
 		if err != nil {
-			utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", k.ID, err)
+			// Port-range exhaustion is logged unconditionally (not gated behind --debug) since it otherwise fails silently, the same way, every poll cycle.
+			if o.cfg.ExitMode == tunnel.ExitModeRaw && strings.Contains(err.Error(), "no port range capacity") {
+				log.Printf("[NODEAGENT] key %s not started: %v - this node has reached its concurrent-key ceiling (see portRangeSize in orchestrator.go)", k.ID, err)
+			} else {
+				utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", k.ID, err)
+			}
 			continue
 		}
 		utils.Debugf("[NODEAGENT] started worker for key %s", k.ID)
@@ -240,13 +210,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 }
 
 func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
-	// Raw mode needs a disjoint port range per worker (see
-	// TCPTunnel.SetPortRange) since all raw-mode workers share one real
-	// IP/raw socket. Proxy mode's egress is a plain net.Dial with its own
-	// OS ephemeral port allocation, so it skips this reservation entirely -
-	// otherwise portRangeSize/portRangeMax would cap even proxy mode at
-	// ~252 concurrent keys for no reason. portIdx stays -1 to mark "no
-	// reservation to release".
+	// Raw mode needs a disjoint port range per worker (see TCPTunnel.SetPortRange); proxy mode's plain net.Dial needs no such reservation.
 	portIdx := -1
 	var portStart, portEnd uint16
 	if o.cfg.ExitMode == tunnel.ExitModeRaw {
@@ -257,12 +221,7 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		}
 	}
 
-	// e2e_encryption is binding, not advisory (see
-	// transport.EncryptedTransport's doc comment on the auto-detect
-	// leniency this replaced) - if it's on for this key but there's no
-	// token to derive a matching key from, refuse to start the worker
-	// rather than silently running it unencrypted, which would defeat the
-	// whole point of the setting.
+	// e2e_encryption is binding: if it's on for a key but there's no token to derive a matching key, refuse to start the worker rather than silently running unencrypted.
 	if k.E2EEncryption && k.Token == "" {
 		if portIdx >= 0 {
 			o.ports.release(portIdx)
@@ -270,12 +229,7 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 		return nil, fmt.Errorf("key %s has e2e_encryption on but no usable token", k.ID)
 	}
 
-	// For yandex_multistream, each stream must compress/encrypt itself
-	// before MultiStreamTransport ever sees the data: its Send() reads
-	// streamIndex off what it assumes is a raw IP/TCP header (see
-	// multistream.go) to pin one real connection to one stream - handed
-	// compressed/encrypted bytes instead, that read is just noise. Mirrors
-	// mobile.go's client-side wrapYandex.
+	// For yandex_multistream, each stream must compress/encrypt itself before MultiStreamTransport sees the data, since Send() reads streamIndex off what it assumes is a raw header.
 	wrapStream := func(yd *yandex.YandexDocsTransport, idx int, perStreamKey bool) transport.Transport {
 		if !k.E2EEncryption {
 			yd.EnableSelfCompression()
@@ -360,12 +314,7 @@ func (o *Orchestrator) reportUsage(ctx context.Context) {
 		return
 	}
 
-	// The control plane rejects a request over 1000 deltas outright (see
-	// handleNodeUsage's own cap) rather than partially applying it - above
-	// that many concurrently active keys on one node, sending them all in
-	// one request silently drops the ENTIRE usage report every tick instead
-	// of just the excess. Chunking keeps usage/quota enforcement correct
-	// past that scale instead of only below it.
+	// The control plane rejects a usage request over 1000 deltas outright rather than partially applying it, so this chunks reports to keep enforcement correct past that scale.
 	const usageChunkSize = 1000
 	var disabledNow []string
 	for start := 0; start < len(deltas); start += usageChunkSize {
@@ -396,9 +345,7 @@ func (o *Orchestrator) reportUsage(ctx context.Context) {
 	}
 }
 
-// diffCounter handles the (rare) case of a transport reconnect resetting its
-// cumulative counters: a negative-looking diff is treated as "count from
-// zero again" rather than underflowing a uint64 subtraction.
+// diffCounter treats a negative-looking diff (from a transport reconnect resetting counters) as "count from zero again" rather than underflowing a uint64 subtraction.
 func diffCounter(previous, current uint64) uint64 {
 	if current < previous {
 		return current

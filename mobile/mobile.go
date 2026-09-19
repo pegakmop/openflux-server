@@ -1,10 +1,4 @@
-// Package mobile is the sole entry point bound into an Android .aar via
-// `gomobile bind` (see build_android_aar.sh). gomobile's bridging only
-// supports exported functions/structs/interfaces built from a small set of
-// types (string, []byte, bool, numeric types, error, and other bound
-// interfaces/structs - no generics, no raw channels or maps), so this
-// package stays a thin façade over transport/tunnel/gateway rather than
-// exposing those packages' own richer APIs directly.
+// Package mobile is the sole entry point bound into an Android .aar via `gomobile bind`; it stays a thin facade since gomobile only bridges a small set of types.
 package mobile
 
 import (
@@ -24,58 +18,24 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-// originalResolver is whatever net.DefaultResolver was before StartTunnel
-// first overrides it (see Protector below) - captured once at package load,
-// before anything has a chance to change it, so StopTunnel can put it back.
 var originalResolver = net.DefaultResolver
 
-// The "oneme" (MAX) transport pulls in github.com/pion/transport/v2/stdnet
-// -> github.com/wlynxg/anet, which uses a //go:linkname hook into net's
-// internals that Go 1.23+'s linker rejects by default ("invalid reference
-// to net.zoneCache"). It's not actually unfixable - anet's own README
-// documents the fix - it just needs `-ldflags=-checklinkname=0` passed to
-// `gomobile bind` (see build_android_aar.sh), which isn't something the Go
-// toolchain can be told to do from within this source file.
+// The "oneme" (MAX) transport needs `-ldflags=-checklinkname=0` passed to `gomobile bind` (see build_android_aar.sh) or Go 1.23+'s linker rejects its //go:linkname hook.
 
-// Callback receives lifecycle and traffic updates from a running tunnel.
-// Implemented on the Kotlin side; gomobile exposes it there as a Java
-// interface that Go can call into.
 type Callback interface {
 	OnStatus(status string) // "connecting" | "connected" | "error:<message>" | "stopped"
 	OnStats(bytesSent int64, bytesReceived int64)
-	// OnLogEvent reports a fine-grained connection-lifecycle event for a
-	// human-facing log feed, distinct from OnStatus's coarse current-state
-	// snapshot: OnStatus only ever says "connected" once per StartTunnel
-	// call, while the transport keeps silently reconnecting in the
-	// background after that - these events are what makes that visible.
-	// code/detail are transport.Event* constants and their documented
-	// detail shapes (see transport/transport.go).
+	// OnLogEvent is what surfaces silent background reconnects that OnStatus's one-time "connected" snapshot misses; code/detail are transport.Event* constants.
 	OnLogEvent(code string, detail string)
-	// OnRawLog delivers one line of the engine's internal debug log
-	// (raw sockets, transport internals, ...) - only fires when
-	// Config.VerboseLogging is set.
 	OnRawLog(line string)
 }
 
-// Protector exempts a raw socket fd from the Android VPN's own tunnel
-// interface (Kotlin implements this as a thin call to
-// android.net.VpnService.protect(fd)). Without it, every connection the
-// transport itself makes - to the doc, to DNS, ... - gets captured by the
-// very tunnel it's supposed to be carrying, which deadlocks the whole
-// thing (see transport.ProtectedDialer's doc comment for the full story).
-// May be nil - StartTunnel then runs unprotected, which is correct for
-// callers that aren't behind an Android VpnService (there's nothing to be
-// captured by).
+// Protector exempts a raw socket from the Android VPN's own tunnel; without it every transport connection gets captured by the tunnel it's meant to carry, deadlocking it. May be nil outside an Android VpnService.
 type Protector interface {
 	Protect(fd int) bool
 }
 
-// Config is the JSON contract for StartTunnel, mirroring one Android
-// profile's connection fields. There is no code path where this app makes a
-// live request to a controlplane to learn where to connect - doc_url always
-// comes from data already embedded in an imported deep link or pasted in by
-// hand (a prior "key" mode that resolved a token via live HTTPS was removed:
-// that request had none of the tunnel's disguise and was trivial to block).
+// Config's doc_url always comes from an imported deep link or pasted by hand - a prior live-resolve "key" mode was removed since that request had no disguise and was trivial to block.
 type Config struct {
 	Mode string `json:"mode"` // must be "manual" - see buildTransport
 
@@ -84,46 +44,21 @@ type Config struct {
 	MaxToken  string `json:"max_token"` // max: your MAX account's own auth token
 	MaxUID    int64  `json:"max_uid"`   // max: the contact's user ID to place the call to
 
-	// DocURLs is yandex_multistream's doc_url: 2+ independent Yandex Docs
-	// sessions. The exit node needs the exact same list, any order.
 	DocURLs []string `json:"doc_urls,omitempty"`
 
 	KeyToken string `json:"key_token,omitempty"`
 
-	// E2EEncryption + a non-blank KeyToken wraps the transport in
-	// transport.NewEncryptedTransport. Kept separate from "KeyToken is
-	// non-blank" - KeyToken is already carried by every KEY-mode profile
-	// for unrelated reasons, and the client has no fallback if it encrypts
-	// against an exit node that can't (only the exit node auto-detects).
 	E2EEncryption bool `json:"e2e_encryption,omitempty"`
 
-	// MTU is informational here - the caller applies it to the Android
-	// VpnService.Builder itself before opening the TUN fd.
 	MTU         int    `json:"mtu"`
 	DNSUpstream string `json:"dns_upstream"`
 
-	// SiteSplitMode is the per-site split-tunneling mode: "" or "off"
-	// (everything through the tunnel), "exclude" (everything except the
-	// sites below), or "include" (only the sites below). SiteSplitSites is
-	// the list of domains - accepting suffix wildcards like "*.ru" and
-	// literal IPs too - those rules apply to. See gateway.SitePolicy -
-	// listeners don't set it; only the client's StartTunnel consumes it.
 	SiteSplitMode  string   `json:"site_split_mode,omitempty"`
 	SiteSplitSites []string `json:"site_split_sites,omitempty"`
 
-	// ForceBootstrapDNS, when set, replaces the fixed public resolvers
-	// StartTunnel would otherwise use to resolve the transport's own
-	// hostnames (docs.yandex.ru and friends) before the tunnel exists to
-	// carry anything else - see transport.SetBootstrapDNSServers. Empty
-	// leaves the defaults in place. This is about getting the very first
-	// connection off the ground on a network whose own resolver can't reach
-	// (or refuses to answer for) those two public ones; it has no bearing on
-	// DNSUpstream above, which is queried only once the tunnel is already up.
+	// ForceBootstrapDNS overrides the fixed public resolvers used to resolve the transport's own hostnames before the tunnel exists; unrelated to the tunneled DNSUpstream.
 	ForceBootstrapDNS string `json:"force_bootstrap_dns,omitempty"`
 
-	// VerboseLogging turns on the engine's internal debug log (raw sockets,
-	// transport internals, ...) for this session, delivered via
-	// Callback.OnRawLog.
 	VerboseLogging bool `json:"verbose_logging,omitempty"`
 }
 
@@ -151,11 +86,6 @@ var (
 	currentSocks *socks5Session
 )
 
-// StartTunnel brings up a full client tunnel bound to tunFd - a TUN file
-// descriptor already established by the caller's VpnService - and relays
-// its traffic through the transport described by configJSON. Only one
-// tunnel runs at a time; call StopTunnel before starting another (e.g. to
-// switch profiles). protector may be nil (see Protector's doc comment).
 func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -235,14 +165,7 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	return nil
 }
 
-// NetworkChanged tells the running tunnel's transport to retry right now
-// instead of waiting to notice on its own - see
-// transport.Transport.ForceReconnect's doc comment for why that matters on
-// a network that goes silent instead of resetting the connection. The
-// caller (Android's ConnectivityManager, or the equivalent on another
-// platform) already knows the active network changed well before a read or
-// write on the old one would ever time out. A safe no-op when nothing is
-// running.
+// NetworkChanged lets the caller trigger an immediate retry instead of waiting for a read/write timeout to notice a dead network - a safe no-op when nothing is running.
 func NetworkChanged() {
 	mu.Lock()
 	s := current
@@ -252,8 +175,6 @@ func NetworkChanged() {
 	}
 }
 
-// StopTunnel tears down the currently running tunnel, if any. Safe to call
-// when nothing is running.
 func StopTunnel() error {
 	mu.Lock()
 	s := current
@@ -277,22 +198,7 @@ func StopTunnel() error {
 	return nil
 }
 
-// StartSocks5Proxy brings up a local SOCKS5 (CONNECT-only, TCP, no auth)
-// proxy on listenAddr (e.g. "127.0.0.1:1080") and relays every connection
-// made to it through the transport described by configJSON - the same
-// transport/tunnel stack StartTunnel uses, minus the TUN/VpnService/gateway
-// layer. Unlike StartTunnel this doesn't capture the device's traffic at
-// all: only whatever the caller explicitly points at listenAddr goes through
-// it, so no VPN permission and no Protector is needed here - there's no
-// self-created tunnel interface for this process's own connections to loop
-// back into. Only one of StartTunnel/StartSocks5Proxy runs at a time; call
-// the matching Stop function first to switch between them.
-//
-// A SOCKS5 CONNECT target's hostname (not just a literal IP) is resolved by
-// the device's normal DNS resolver before the connection ever reaches the
-// tunnel - same as the desktop client's --socks5 mode (see
-// socks5.SOCKS5Server/tunnel.TCPTunnel.DialTCP) - only the resulting IP
-// traffic is tunneled, not the DNS lookup itself.
+// StartSocks5Proxy relays only what's explicitly pointed at listenAddr, so unlike StartTunnel it needs no VPN permission or Protector.
 func StartSocks5Proxy(configJSON string, listenAddr string, cb Callback) error {
 	socksMu.Lock()
 	defer socksMu.Unlock()
@@ -355,8 +261,6 @@ func StartSocks5Proxy(configJSON string, listenAddr string, cb Callback) error {
 	return nil
 }
 
-// StopSocks5Proxy tears down the currently running SOCKS5 proxy, if any.
-// Safe to call when nothing is running.
 func StopSocks5Proxy() error {
 	socksMu.Lock()
 	s := currentSocks
@@ -375,9 +279,6 @@ func StopSocks5Proxy() error {
 	return nil
 }
 
-// buildTransport picks, constructs, and fully wires (compression/encryption
-// included - see wrapYandex/wrapGeneric) the transport for cfg. The result
-// is ready for Start; callers don't need to wrap it any further.
 func buildTransport(cfg Config, transportConfig transport.TransportConfig) (transport.Transport, error) {
 	if cfg.Mode != "manual" {
 		return nil, fmt.Errorf(`config.mode must be "manual", got %q`, cfg.Mode)
@@ -417,18 +318,7 @@ func buildTransport(cfg Config, transportConfig transport.TransportConfig) (tran
 	}
 }
 
-// wrapYandex applies this profile's E2E setting to a Yandex transport.
-// streamIdx selects the per-stream key derivation for one leg of a
-// yandex_multistream profile (matching nodeagent's own per-stream keying,
-// so both ends derive the same per-stream keys); -1 means the
-// single-stream case. Either way, yd manages its own compression (and, with
-// encryption on, its own encryption) internally rather than being wrapped in
-// anything - see YandexDocsTransport.EnableSelfCompression and
-// EnableEncryptedSelfCompression's doc comments for why that's strictly
-// better than the traditional transport.CompressedTransport(transport.EncryptedTransport(...))
-// wrapping (never worse, and better once the peer's keepalive proves it
-// also upgraded) while remaining fully compatible with a peer still using
-// that traditional wrapping.
+// wrapYandex: yd manages its own compression/encryption internally (see EnableSelfCompression/EnableEncryptedSelfCompression) rather than being wrapped externally - never worse, and better once the peer proves it too.
 func wrapYandex(yd *yandex.YandexDocsTransport, cfg Config, streamIdx int) transport.Transport {
 	if !cfg.E2EEncryption || cfg.KeyToken == "" {
 		yd.EnableSelfCompression()
@@ -442,9 +332,6 @@ func wrapYandex(yd *yandex.YandexDocsTransport, cfg Config, streamIdx int) trans
 	return yd
 }
 
-// wrapGeneric applies E2E encryption (if configured), then compression, to
-// any transport that doesn't manage its own the way Yandex now can - volga
-// and max, unchanged from before this feature existed.
 func wrapGeneric(inner transport.Transport, cfg Config) transport.Transport {
 	if cfg.E2EEncryption && cfg.KeyToken != "" {
 		inner = transport.NewEncryptedTransport(inner, cfg.KeyToken, false)
@@ -452,9 +339,6 @@ func wrapGeneric(inner transport.Transport, cfg Config) transport.Transport {
 	return transport.NewCompressedTransport(inner)
 }
 
-// sitePolicy turns the client config's site-split fields into the gateway's
-// route policy. An empty/unset mode or empty site list yields a disabled
-// policy (identical to today's always-tunnel behavior).
 func sitePolicy(cfg Config) *gateway.SitePolicy {
 	return gateway.NewSitePolicy(gateway.ParseSiteSplitMode(cfg.SiteSplitMode), cfg.SiteSplitSites)
 }

@@ -158,9 +158,6 @@ func generateRSAClientKey(t *testing.T) (ssh.PublicKey, string) {
 	return signer.PublicKey(), string(pemBytes)
 }
 
-// startTestSSHServer runs one exec session per connection: it decodes the
-// "exec" request's command, hands it to handle (which writes to the
-// session's stdout/stderr and returns an exit code), then closes.
 func startTestSSHServer(t *testing.T, config *ssh.ServerConfig, hostSigner ssh.Signer, handle func(cmd string, stdout, stderr io.Writer) int) string {
 	t.Helper()
 	config.AddHostKey(hostSigner)
@@ -404,10 +401,7 @@ func TestDeployNonZeroExitIsAnError(t *testing.T) {
 
 // --- keepalive --------------------------------------------------------
 
-// golang.org/x/crypto/ssh sends no keepalive traffic of its own, so a remote
-// command producing no output for a while can sit on an idle connection long
-// enough for a NAT/firewall to drop it. Shrinks keepaliveInterval and asserts
-// at least one keepalive reaches the server during a silent remote command.
+// golang.org/x/crypto/ssh sends no keepalive of its own, so a silent remote command can idle out a NAT; asserts a keepalive still reaches the server.
 func TestDeploySendsKeepaliveDuringQuietRemoteCommand(t *testing.T) {
 	old := keepaliveInterval
 	keepaliveInterval = 20 * time.Millisecond
@@ -469,9 +463,6 @@ func TestDeploySendsKeepaliveDuringQuietRemoteCommand(t *testing.T) {
 								continue
 							}
 							req.Reply(true, nil)
-							// Quiet for several keepalive intervals - no
-							// output at all - before finishing, mirroring
-							// install.sh's silent `go build` steps.
 							time.Sleep(200 * time.Millisecond)
 							channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 							return

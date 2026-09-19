@@ -20,9 +20,7 @@ type RawSocketEndpoint struct {
 	dispatcher stack.NetworkDispatcher
 	sendFd     int
 	recvFd     int
-	// recvUDPFd is a SECOND receive socket, for UDP: SOCK_RAW delivers exactly the protocol it was
-	// opened with, and IPPROTO_RAW is send-only. While the only receive socket was IPPROTO_TCP,
-	// reply datagrams never reached the tunnel at all (mirrors the linux implementation).
+	// recvUDPFd is a second receive socket for UDP: SOCK_RAW delivers only the protocol it was opened with, and IPPROTO_RAW is send-only.
 	recvUDPFd       int
 	nicID           tcpip.NICID
 	packetIn        atomic.Uint64
@@ -88,10 +86,6 @@ func (e *RawSocketEndpoint) SetTransportSender(sendFunc func([]byte)) {
 	e.sendToTransport = sendFunc
 }
 
-// readLoop is the return path of ONE protocol (mirrors the linux implementation: the socket is
-// opened for that protocol, wantProto confirms it from the header). The length threshold is
-// protocol-dependent too: IP+TCP = 40, IP+UDP = 28, and a single threshold of 40 would drop short
-// datagrams such as a DNS reply.
 func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 	buf := make([]byte, 65535)
 	minLen := 40

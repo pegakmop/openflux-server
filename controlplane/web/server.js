@@ -1,13 +1,4 @@
-// Custom production entry that runs the adapter-node build output and adds
-// the two things SvelteKit itself can't do behind `paths.base`:
-//
-//   * /v1/* and /healthz get proxied to the Go controlplane. With nginx in
-//     front (recommended) those never reach Bun at all — nginx routes them to
-//     controlplane directly. This file only matters in http-mode (no nginx),
-//     where the browser still talks to a single origin.
-//   * the site root answers /admin/ with a redirect instead of a bare 404.
-//
-// Run with: bun server.js   (package.json "start": "bun server.js")
+// Custom production entry: proxies /v1/* and /healthz to the Go controlplane (skipped when nginx does it) and redirects the bare site root to /admin/.
 
 import { createServer } from 'node:http';
 import { handler } from './build/handler.js';

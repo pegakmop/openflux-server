@@ -8,10 +8,6 @@ import (
 	"universal-bypass-tool/transport/yandex"
 )
 
-// A plain "yandex" profile with no E2E encryption gets self-compression
-// enabled instead of an external transport.CompressedTransport wrapper (see
-// wrapYandex) - the returned type is the bare *yandex.YandexDocsTransport
-// either way, since self-compress mode doesn't wrap it in anything.
 func TestBuildTransportManualYandex(t *testing.T) {
 	trans, err := buildTransport(Config{Mode: "manual", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
 	if err != nil {
@@ -22,10 +18,6 @@ func TestBuildTransportManualYandex(t *testing.T) {
 	}
 }
 
-// A "yandex" profile with E2E encryption gets encrypted self-compression
-// (see wrapYandex), still with no external wrapping - same bare
-// *yandex.YandexDocsTransport type. This only guards that buildTransport
-// wires E2E config through rather than silently ignoring it.
 func TestBuildTransportManualYandexWithE2EEncryption(t *testing.T) {
 	cfg := Config{
 		Mode:          "manual",
@@ -48,9 +40,6 @@ func TestBuildTransportManualMissingDocURL(t *testing.T) {
 	}
 }
 
-// volga doesn't manage its own compression (see wrapGeneric) - it's always
-// wrapped in transport.CompressedTransport, same as before this feature
-// existed.
 func TestBuildTransportManualVolga(t *testing.T) {
 	trans, err := buildTransport(Config{Mode: "manual", Transport: "volga", DocURL: "https://docs.yandex.ru/x"}, transport.DefaultConfig())
 	if err != nil {
@@ -113,18 +102,13 @@ func TestBuildTransportUnknownMode(t *testing.T) {
 }
 
 func TestBuildTransportRejectsRemovedKeyMode(t *testing.T) {
-	// "key" mode used to make StartTunnel itself resolve a controlplane
-	// token into a doc_url over a live, unshielded HTTPS request - removed
-	// because that request had no disguise and was trivial to block. Any
-	// caller still sending it should get a clear error, not silent misuse.
+	// "key" mode used to make StartTunnel resolve a controlplane token over live HTTPS; removed as undisguised and trivial to block - callers still sending it should get a clear error.
 	if _, err := buildTransport(Config{Mode: "key", DocURL: "https://x"}, transport.DefaultConfig()); err == nil {
 		t.Fatalf(`expected an error for the removed "key" mode`)
 	}
 }
 
 func TestBuildTransportMultiStream(t *testing.T) {
-	// KeyToken set but E2EEncryption left false: must still build successfully
-	// without encrypting - a bare KeyToken alone must never turn encryption on.
 	cfg := Config{
 		Mode:      "manual",
 		Transport: "yandex_multistream",
@@ -164,10 +148,6 @@ func TestBuildTransportMultiStreamRequiresAtLeastTwoURLs(t *testing.T) {
 	}
 }
 
-// StartSocks5Proxy doesn't actually need a reachable doc_url to exercise its
-// own lifecycle/mutual-exclusion logic: YandexDocsTransport.Start() launches
-// its connection attempt in a background goroutine and returns immediately
-// regardless of whether the URL is real (see yandex.go's Start/connectToDoc).
 func TestStartSocks5ProxyLifecycleAndMutualExclusion(t *testing.T) {
 	cfg := `{"mode":"manual","transport":"yandex","doc_url":"http://127.0.0.1:1"}`
 

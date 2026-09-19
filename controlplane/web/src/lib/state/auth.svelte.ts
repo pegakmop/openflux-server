@@ -1,7 +1,6 @@
 import { browser } from '$app/environment';
 
-// Keeps the same localStorage key the old embedded panel used, so anyone who
-// already logged in once doesn't have to re-enter the token after an upgrade.
+// Keeps the same localStorage key the old embedded panel used, so an already-logged-in admin doesn't have to re-enter the token.
 const TOKEN_KEY = 'openflux_admin_token';
 
 function readToken(): string | null {

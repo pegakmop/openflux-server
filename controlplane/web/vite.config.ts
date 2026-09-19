@@ -8,10 +8,7 @@ export default defineConfig({
 		port: 3000,
 		strictPort: false,
 		proxy: {
-			// Dev uses the same single-origin split as production: /v1/* lives
-			// at the origin and is forwarded straight to the Go controlplane.
-			// The API base is overridable for people running controlplane
-			// somewhere other than the default dev port.
+			// Dev mirrors production's single-origin split: /v1/* forwards to the Go controlplane.
 			'/v1': {
 				target: process.env.CONTROLPLANE_UPSTREAM || 'http://127.0.0.1:8080',
 				changeOrigin: true

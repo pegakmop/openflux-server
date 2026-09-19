@@ -1,8 +1,4 @@
-// Package mailru implements a transport that tunnels packets through
-// Mail.ru's cloud document editor (docs.datacloudmail.ru), the same
-// coauthoring backend family as Yandex.Docs. Two peers open the same
-// public document and smuggle packets through the "cursor" field of the
-// collaborative editing protocol.
+// Package mailru tunnels packets through Mail.ru's cloud document editor (docs.datacloudmail.ru), the Mail.ru counterpart to Yandex.Docs.
 package mailru
 
 import (
@@ -66,9 +62,6 @@ type MailruDocsTransport struct {
 	baseUserID  string
 }
 
-// NewMailruDocsTransport accepts either a bare weblink ("AbCdEfGh1/IjKlMnOp2")
-// or a full public URL ("https://cloud.mail.ru/public/AbCdEfGh1/IjKlMnOp2"),
-// normalizing the latter to the former.
 func NewMailruDocsTransport(weblink string, config transport.TransportConfig) *MailruDocsTransport {
 	t := &MailruDocsTransport{
 		BaseTransport: transport.NewBaseTransport(config),
@@ -204,13 +197,7 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 			utils.SafeGo("mailru.writer", t.writerLoop)
 		}
 
-		// Auth - fired immediately, same as the Yandex.Docs transport. No
-		// need to wait for the server's own "0{"/"40" handshake frames
-		// first: Mail.ru's coauthoring server buffers and processes these
-		// once its own session state catches up, and waiting for explicit
-		// acks here only stretches the outage window on every reconnect
-		// (Mail.ru can delay a fresh joiner's auth confirmation by up to
-		// ~30s while it reconciles with the other participant).
+		// Auth fires immediately without waiting for the server's handshake frames, since Mail.ru buffers and can delay a fresh joiner's ack by up to ~30s.
 		auth1 := fmt.Sprintf(`40{"token":"%s"}`, info.Token)
 		session.safeWrite(websocket.TextMessage, []byte(auth1))
 
@@ -275,8 +262,6 @@ func (t *MailruDocsTransport) connectToDoc(attempt int) {
 }
 
 func (t *MailruDocsTransport) writerLoop() {
-	// The write queue is created once and preserved across reconnects, so we
-	// capture it and block on it instead of polling with a sleep.
 	var queue chan []byte
 	for t.IsRunning() && queue == nil {
 		t.Mu.Lock()
@@ -424,8 +409,6 @@ func reconnectBackoff(n int) time.Duration {
 	return d
 }
 
-// fetchDocInfo POSTs to Mail.ru's public-document editor API and parses the
-// response into the fields needed to open the collaborative WebSocket.
 func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 
@@ -475,9 +458,7 @@ func (t *MailruDocsTransport) fetchDocInfo(weblink string) (MailruDocsInfo, erro
 	fileType, _ := document["fileType"].(string)
 	docURL, _ := document["url"].(string)
 	docTitle, _ := document["title"].(string)
-	// document.permissions is an object of booleans (comment/edit/download/…),
-	// not a number - sending it as anything else makes the editor server
-	// reject the auth message with "access deny".
+	// document.permissions must be sent as an object of booleans, not a number, or the editor server rejects the auth message with "access deny".
 	permissions, _ := document["permissions"].(map[string]interface{})
 	if permissions == nil {
 		permissions = make(map[string]interface{})

@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// fakeTransport is a minimal in-process Transport used to test the batching
-// wrapper. With loopback=true it immediately delivers whatever is Sent back
-// to the registered receive callback (a perfect, ordered channel).
 type fakeTransport struct {
 	mu       sync.Mutex
 	sent     [][]byte
@@ -94,8 +91,6 @@ func TestBatchedTransportRoundTripPreservesPacketsAndOrder(t *testing.T) {
 	}
 }
 
-// The core optimization: a burst of packets must collapse into ONE inner
-// transport message instead of one message per packet.
 func TestBatchedTransportCoalescesBurstIntoOneMessage(t *testing.T) {
 	inner := &fakeTransport{}
 	bt := NewBatchedTransport(inner)

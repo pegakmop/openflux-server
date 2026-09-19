@@ -38,6 +38,7 @@ func (a *App) Router() http.Handler {
 
 	mux.HandleFunc("POST /v1/admin/nodes", a.withAdmin(a.handleCreateNode))
 	mux.HandleFunc("GET /v1/admin/nodes", a.withAdmin(a.handleListNodes))
+	mux.HandleFunc("PATCH /v1/admin/nodes/{id}", a.withAdmin(a.handlePatchNode))
 	mux.HandleFunc("POST /v1/admin/nodes/{id}/rotate-token", a.withAdmin(a.handleRotateNodeToken))
 	mux.HandleFunc("GET /v1/admin/system", a.withAdmin(a.handleSystem))
 	mux.HandleFunc("GET /v1/admin/stats/summary", a.withAdmin(a.handleStatsSummary))
@@ -100,11 +101,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeInternalError responds 500 with message (client-facing, never err's
-// raw text - that could leak internals) while logging the actual err
-// server-side. Without this, a 500 was a dead end for whoever's operating
-// the server: "create key failed" alone gives no way to tell a Postgres
-// outage from a bad query from anything else - it's already happened once.
+// writeInternalError responds 500 with a client-facing message (never err's raw text, which could leak internals) while logging the actual error server-side.
 func writeInternalError(w http.ResponseWriter, r *http.Request, message string, err error) {
 	log.Printf("%s %s: %s: %v", r.Method, r.URL.Path, message, err)
 	writeError(w, http.StatusInternalServerError, message)

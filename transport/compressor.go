@@ -36,11 +36,6 @@ func (c *CompressedTransport) Receive(callback func([]byte)) {
 	})
 }
 
-// Compress is CompressedTransport's per-item codec (LZ4 above
-// MinCompressSize, stored as-is below it), exported so transport/yandex can
-// reuse this exact, unchanged format for the legacy per-packet path its own
-// self-managed compression falls back to - see
-// YandexDocsTransport.EnableSelfCompression's doc comment.
 func Compress(data []byte) []byte {
 	if len(data) <= MinCompressSize {
 		out := make([]byte, 1, len(data)+1)
@@ -66,8 +61,6 @@ func Compress(data []byte) []byte {
 	return buf.Bytes()
 }
 
-// Decompress reverses Compress - see its doc comment on why this is
-// exported.
 func Decompress(data []byte) ([]byte, error) {
 	if len(data) < 1 {
 		return data, nil

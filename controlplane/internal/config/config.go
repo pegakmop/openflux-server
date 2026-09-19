@@ -16,11 +16,7 @@ type Config struct {
 	NodePollWindow time.Duration
 	RateLimitRPS   float64
 	RateLimitBurst int
-	// PublicBaseURL is how clients reach this controlplane (e.g.
-	// https://your-domain-or-ip - no path, no trailing slash) - not the
-	// same thing as ListenAddr, which is only the internal bind address.
-	// Optional: unset just means admin-created keys don't get a deep link
-	// in their API response (see internal/api/deeplink.go).
+	// PublicBaseURL is how clients reach this controlplane, not the same as ListenAddr (the internal bind address); unset just means no deep link in admin-created key responses.
 	PublicBaseURL string
 }
 

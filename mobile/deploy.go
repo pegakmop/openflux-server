@@ -7,13 +7,7 @@ import (
 	"universal-bypass-tool/deployssh"
 )
 
-// SSHTargetJSON/DeployOptionsJSON mirror deployssh.SSHTarget/DeployOptions
-// field-for-field. Deploy takes them as JSON strings rather than gomobile-
-// bound struct types: gomobile silently drops any top-level function that
-// takes a custom struct as a parameter (confirmed empirically - it doesn't
-// even error, the function just never appears in the generated binding),
-// so passing JSON and unmarshaling it here follows the same pattern
-// StartTunnel already uses for its own Config.
+// Deploy takes JSON strings rather than gomobile-bound structs: gomobile silently drops any exported function taking a custom struct parameter.
 type sshTargetJSON struct {
 	Host                    string `json:"host"`
 	Port                    int    `json:"port"`
@@ -41,21 +35,12 @@ type deployOptionsJSON struct {
 	RunNodeHere     bool   `json:"run_node_here"`
 }
 
-// DeployCallback receives live progress from Deploy. Implemented on the
-// Kotlin side, same pattern as Callback in mobile.go - unlike structs,
-// interfaces work fine as direct gomobile function parameters.
 type DeployCallback interface {
 	OnLog(line string)
 	OnHostKeyFingerprint(fingerprint string)
 	OnDeployResult(panelURL, adminToken, nodeToken string)
 }
 
-// Deploy runs openflux-deploy's install.sh on the target described by
-// targetJSON over SSH, non-interactively, with optsJSON's fields pre-set as
-// environment variables - see deployssh.Deploy for the actual
-// implementation and deployssh.SSHTarget/DeployOptions for the JSON shape
-// (snake_case field names, as shown above). Blocks until the remote script
-// finishes.
 func Deploy(targetJSON string, optsJSON string, cb DeployCallback) error {
 	var target sshTargetJSON
 	if err := json.Unmarshal([]byte(targetJSON), &target); err != nil {
@@ -96,8 +81,6 @@ func Deploy(targetJSON string, optsJSON string, cb DeployCallback) error {
 	)
 }
 
-// deployCallbackAdapter satisfies deployssh.Callback by forwarding to the
-// gomobile-bound DeployCallback.
 type deployCallbackAdapter struct {
 	cb DeployCallback
 }

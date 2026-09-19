@@ -8,9 +8,6 @@ import (
 )
 
 func TestInjectInboundBeforeAttachDoesNotPanic(t *testing.T) {
-	// A packet can arrive (or be mid-flight from a Close() racing a
-	// send) before/after this endpoint has a dispatcher - see
-	// InjectInbound's doc comment. Must be silently dropped, not crash.
 	e := NewTunnelLinkEndpoint()
 	e.InjectInbound([]byte{0x45, 0x00, 0x00, 0x14})
 
@@ -48,14 +45,7 @@ func TestPacketCounts(t *testing.T) {
 	}
 }
 
-// TestInjectInboundRecoversFromDispatcherPanic guards a real production
-// incident: gvisor's own NAT/conntrack code (enabled on the exit node via
-// SetForwardingDefaultAndAllNICs) panics instead of returning an error on
-// some packets it doesn't expect ("unexpected transport protocol = 0", seen
-// live). InjectInbound runs on a transport's shared read-loop goroutine, so
-// an unrecovered panic here took the whole exit-node process down -
-// disconnecting every client it was serving, not just whoever sent the one
-// packet that triggered it.
+// TestInjectInboundRecoversFromDispatcherPanic guards a real production incident: gvisor's NAT/conntrack code panics on some packets, which used to take down the whole exit-node process.
 func TestInjectInboundRecoversFromDispatcherPanic(t *testing.T) {
 	e := NewTunnelLinkEndpoint()
 	e.Attach(panickingDispatcher{})
@@ -67,11 +57,6 @@ func TestInjectInboundRecoversFromDispatcherPanic(t *testing.T) {
 	}
 }
 
-// fakeDispatcher is just enough of stack.NetworkDispatcher to prove
-// Attach/IsAttached track a real (non-nil) value - InjectInbound's actual
-// delivery through a live dispatcher is exercised via gvisor itself
-// elsewhere (tunnel.TCPTunnel/gateway.Server), not worth re-deriving gvisor's
-// own PacketBuffer/NetworkDispatcher plumbing just for this.
 type fakeDispatcher struct{}
 
 func (fakeDispatcher) DeliverNetworkPacket(tcpip.NetworkProtocolNumber, *stack.PacketBuffer) {}

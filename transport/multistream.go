@@ -2,10 +2,6 @@ package transport
 
 import "sync"
 
-// MultiStreamTransport spreads traffic across several underlying
-// transports, routed by flow (see streamIndex) so one real connection
-// always rides one stream in order - this multiplies throughput across
-// concurrent flows, not a single one.
 type MultiStreamTransport struct {
 	streams []Transport
 
@@ -51,8 +47,7 @@ func (m *MultiStreamTransport) Send(data []byte) error {
 	return m.streams[streamIndex(data, len(m.streams))].Send(data)
 }
 
-// streamIndex hashes src^dst port (same offset for TCP/UDP) - XOR keeps the
-// result identical for a reply, whose ports are swapped relative to the request.
+// streamIndex hashes src^dst port; XOR keeps the result identical for a reply, whose ports are swapped relative to the request.
 func streamIndex(data []byte, n int) int {
 	if n <= 1 {
 		return 0

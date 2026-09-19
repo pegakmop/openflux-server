@@ -19,8 +19,7 @@ const initialThemeValue = initialTheme();
 let theme = $state<Theme>(initialThemeValue);
 
 function apply(t: Theme) {
-	// Also persisted pre-hydration by the inline script in app.html; keep this
-	// as the source of truth for afterwards.
+	// Also persisted pre-hydration by the inline script in app.html; this is the source of truth afterwards.
 	if (browser) document.documentElement.dataset.theme = t;
 }
 
@@ -41,6 +40,5 @@ export const themeStore = {
 	}
 };
 
-// Make sure the attribute matches even when the module initialises after the
-// inline script (e.g. client-side navigation into the app).
+// Make sure the attribute matches even when the module initialises after the inline script.
 apply(initialThemeValue);

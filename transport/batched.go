@@ -11,9 +11,6 @@ import (
 	"universal-bypass-tool/utils"
 )
 
-// Defaults for the coalescing layer. Tunable at runtime via env vars so the
-// batch size can be matched to a channel's per-message limits without a
-// rebuild (OPENFLUX_BATCH_BYTES / OPENFLUX_BATCH_COUNT / OPENFLUX_BATCH_LINGER_MS).
 const (
 	defaultMaxBatchBytes = 8192
 	defaultMaxBatchCount = 64
@@ -21,23 +18,7 @@ const (
 	batchQueueDepth      = 4096
 )
 
-// BatchedTransport coalesces outgoing tunnel packets into a single
-// zstd-compressed batch per inner transport message instead of sending (and,
-// via CompressedTransport, LZ4-compressing) one message per packet, and
-// splits batches back into packets on receive.
-//
-// Ported from upstream p1neappleXpress/OpenFlux, which uses this as its only
-// batching layer. Here it's opt-in (see --codec in main.go), not the
-// default: the Yandex and Volga transports already coalesce internally
-// (yandex.go's own writerLoop/batchMarker, volga.go's sendBatch) with a
-// peer-capability handshake existing deployments depend on, so wrapping them
-// in this too would double-batch (harmless, just redundant framing) rather
-// than add anything. The MAX/oneme transport has no batching of its own at
-// all, and is the transport this actually helps most.
-//
-// This is the symmetric layer: client and exit node must both wrap a given
-// transport with this (or neither) - main.go's --codec flag keeps that
-// consistent for a single deploy instead of letting the two ends disagree.
+// BatchedTransport is opt-in (see --codec) since Yandex/Volga already coalesce internally; client and exit node must agree on --codec or they can't decode each other's frames.
 type BatchedTransport struct {
 	Transport
 
@@ -85,9 +66,6 @@ func (b *BatchedTransport) Stop() error {
 	return b.Transport.Stop()
 }
 
-// Send copies the packet (the caller's buffer is reused by gVisor) and
-// enqueues it for batching. A full queue drops the packet; the tunnel's TCP
-// will retransmit, same as the inner transport's own "queue full" behavior.
 func (b *BatchedTransport) Send(data []byte) error {
 	p := make([]byte, len(data))
 	copy(p, data)
@@ -131,8 +109,6 @@ func (b *BatchedTransport) flushLoop() {
 		batch := [][]byte{first}
 		size := 2 + len(first)
 
-		// Phase 1: absorb everything already queued (burst coalescing). This
-		// alone collapses a window's worth of segments into one message.
 	drainNow:
 		for size < b.maxBatchBytes && len(batch) < b.maxBatchCount {
 			select {
@@ -148,9 +124,6 @@ func (b *BatchedTransport) flushLoop() {
 			}
 		}
 
-		// Phase 2: brief linger to catch stragglers arriving just after the
-		// burst. Negligible next to the channel RTT, but it fills batches
-		// during steady bulk transfer.
 		if b.lingerMs > 0 && size < b.maxBatchBytes && len(batch) < b.maxBatchCount {
 			timer := time.NewTimer(time.Duration(b.lingerMs) * time.Millisecond)
 		linger:

@@ -18,10 +18,7 @@ type resolveResponse struct {
 	TrafficLimitBytes *int64   `json:"traffic_limit_bytes,omitempty"`
 }
 
-// handleResolve lets a client (the future Android app, or the desktop CLI)
-// turn its key token into connection details and a status, instead of the
-// operator handing out a raw Yandex Docs URL by hand. It is rate-limited per
-// IP since the token is presented directly here.
+// handleResolve is rate-limited per IP since the key token is presented directly here.
 func (a *App) handleResolve(w http.ResponseWriter, r *http.Request) {
 	token, ok := auth.ExtractBearer(r)
 	if !ok {

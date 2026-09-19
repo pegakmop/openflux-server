@@ -66,11 +66,7 @@ func main() {
 		tunnel.SetLocalIP(*localIP)
 	}
 	if *exitNode {
-		// The exit node often runs on a small VPS; keep the heap tight
-		// under load instead of crashing (set GOMEMLIMIT in the
-		// environment for a hard cap on top of this). Per-packet debug
-		// logging is the main allocation source under real traffic - avoid
-		// --debug in production regardless of this.
+		// Keep the heap tight (GOMEMLIMIT) for small-VPS deployments; avoid --debug in production since per-packet logging is the main allocation source.
 		rtdebug.SetGCPercent(20)
 	}
 
@@ -110,11 +106,7 @@ func main() {
 		return wrapped
 	}
 
-	// selfCompressingYandex builds a Yandex transport that manages its own
-	// per-batch compression (see YandexDocsTransport.EnableSelfCompression)
-	// instead of --codec's generic wrapping - it auto-negotiates with the
-	// peer and is never worse than --codec=legacy, so --codec is ignored
-	// for this transport type (it still applies to volga/oneme below).
+	// selfCompressingYandex manages its own per-batch compression and ignores --codec; --codec still applies to volga/oneme.
 	selfCompressingYandex := func(url string) transport.Transport {
 		yd := yandex.NewYandexDocsTransport(url, config)
 		yd.EnableSelfCompression()
@@ -152,10 +144,7 @@ func main() {
 	}
 
 	tun := tunnel.NewTCPTunnelMode(trans, *exitNode, exitMode)
-	// Read back the tunnel's actual mode, not the requested one: raw mode
-	// silently falls back to proxy mode if raw-socket creation fails (e.g.
-	// missing root), and printing the requested mode here would tell the
-	// operator to apply iptables rules a proxy-mode node doesn't need.
+	// Read back the tunnel's actual mode: raw mode silently falls back to proxy mode if raw-socket creation fails.
 	exitMode = tun.ExitMode()
 
 	if *exitNode {
@@ -164,8 +153,7 @@ func main() {
 		} else {
 			log.Printf("Running as EXIT NODE (raw mode, needs root for raw socket)")
 			if *localIP != "" {
-				// Scoped: only drop kernel RSTs from the tunnel's own
-				// egress IP, leaving the host's other services untouched.
+				// Scoped: only drop kernel RSTs from the tunnel's own egress IP, leaving other host services untouched.
 				log.Printf("! Run: sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s %s -j DROP", *localIP)
 			} else {
 				log.Printf("! Kernel RSTs would tear down tunnel connections. Prefer a scoped rule:")
