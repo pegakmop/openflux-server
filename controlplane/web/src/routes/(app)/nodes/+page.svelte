@@ -14,7 +14,7 @@
 	const ONLINE_WINDOW_MS = 3 * 60 * 1000;
 
 	let name = $state('');
-	let maxKeys = $state('500');
+	let maxKeys = $state('999999');
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 	let createdToken = $state<CreateNodeResult | null>(null);
@@ -52,7 +52,7 @@
 		createError = null;
 		try {
 			const parsed = parseInt(maxKeys, 10);
-			createdToken = await api.createNode(name.trim(), isNaN(parsed) ? 500 : parsed);
+			createdToken = await api.createNode(name.trim(), isNaN(parsed) ? 999999 : parsed);
 			toast.ok(t('nodes.registeredSuccess'));
 			name = '';
 			await load();

@@ -32,7 +32,7 @@ func (a *App) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.MaxKeys <= 0 {
-		req.MaxKeys = 500
+		req.MaxKeys = 999999 // no real limit by default
 	}
 
 	token, err := auth.GenerateToken("node")
