@@ -6,7 +6,7 @@ import "testing"
 
 // TestPortAllocatorRangesNeverOverlap guards the actual production bug: two keys' gvisor stacks choosing the same source port and cross-delivering each other's traffic.
 func TestPortAllocatorRangesNeverOverlap(t *testing.T) {
-	var p portAllocator
+	p := portAllocator{rangeSize: DefaultPortRangeSize}
 
 	type held struct{ start, end uint16 }
 	var ranges []held
@@ -26,7 +26,7 @@ func TestPortAllocatorRangesNeverOverlap(t *testing.T) {
 }
 
 func TestPortAllocatorRecyclesReleasedRanges(t *testing.T) {
-	var p portAllocator
+	p := portAllocator{rangeSize: DefaultPortRangeSize}
 
 	idx1, start1, end1, ok := p.alloc()
 	if !ok {
@@ -46,9 +46,10 @@ func TestPortAllocatorRecyclesReleasedRanges(t *testing.T) {
 }
 
 func TestPortAllocatorExhaustion(t *testing.T) {
-	var p portAllocator
+	const testRangeSize = 10000 // large, so this exhausts in a handful of iterations, not hundreds
+	p := portAllocator{rangeSize: testRangeSize}
 
-	maxWorkers := (portRangeMax - portRangeBase + 1) / portRangeSize
+	maxWorkers := (portRangeMax - portRangeBase + 1) / testRangeSize
 	for i := 0; i < maxWorkers; i++ {
 		if _, _, _, ok := p.alloc(); !ok {
 			t.Fatalf("alloc() #%d failed before capacity should be exhausted (capacity=%d)", i, maxWorkers)

@@ -22,7 +22,11 @@ type Config struct {
 	UsageInterval   time.Duration
 	HeartbeatPeriod time.Duration
 	ExitMode        tunnel.ExitMode
+	// PortRangeSize: raw mode's outbound ports per key - trades keys-per-node against connections-per-key; 0 = DefaultPortRangeSize.
+	PortRangeSize int
 }
+
+const DefaultPortRangeSize = 96
 
 func DefaultConfig(controlURL, nodeToken string) Config {
 	return Config{
@@ -32,6 +36,7 @@ func DefaultConfig(controlURL, nodeToken string) Config {
 		UsageInterval:   20 * time.Second,
 		HeartbeatPeriod: 60 * time.Second,
 		ExitMode:        tunnel.ExitModeRaw,
+		PortRangeSize:   DefaultPortRangeSize,
 	}
 }
 
@@ -55,29 +60,28 @@ type Orchestrator struct {
 }
 
 func NewOrchestrator(cfg Config) *Orchestrator {
+	rangeSize := cfg.PortRangeSize
+	if rangeSize <= 0 {
+		rangeSize = DefaultPortRangeSize
+	}
 	return &Orchestrator{
 		client:  NewControlClient(cfg.ControlURL, cfg.NodeToken),
 		cfg:     cfg,
 		workers: make(map[string]*worker),
+		ports:   portAllocator{rangeSize: rangeSize},
 	}
 }
 
-// portRangeSize trades against portAllocator's ceiling on concurrent workers (~251 at 256) - a
-// single active key needs more outbound ports than expected in practice (Telegram alone can open
-// several dozen concurrent connections while loading media), so this stays conservative rather than
-// shrunk further for more keys-per-node; scaling past ~250 keys means running more exit nodes, not
-// a smaller range - controlplane already spreads new keys across whichever active node carries the
-// fewest (see CreateKey). Can't be resized once a worker is running (see TCPTunnel.SetPortRange).
 const (
 	portRangeBase = 1025
-	portRangeSize = 256
 	portRangeMax  = 65535
 )
 
 type portAllocator struct {
-	mu   sync.Mutex
-	next int
-	free []int
+	mu        sync.Mutex
+	rangeSize int
+	next      int
+	free      []int
 }
 
 func (p *portAllocator) alloc() (idx int, start, end uint16, ok bool) {
@@ -94,8 +98,8 @@ func (p *portAllocator) alloc() (idx int, start, end uint16, ok bool) {
 		p.next++
 	}
 
-	rangeStart := portRangeBase + idx*portRangeSize
-	rangeEnd := rangeStart + portRangeSize - 1
+	rangeStart := portRangeBase + idx*p.rangeSize
+	rangeEnd := rangeStart + p.rangeSize - 1
 	if rangeEnd > portRangeMax {
 		if fromFree {
 			p.free = append(p.free, idx)
@@ -200,7 +204,7 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 		if err != nil {
 			// Port-range exhaustion is logged unconditionally (not gated behind --debug) since it otherwise fails silently, the same way, every poll cycle.
 			if o.cfg.ExitMode == tunnel.ExitModeRaw && strings.Contains(err.Error(), "no port range capacity") {
-				log.Printf("[NODEAGENT] key %s not started: %v - this node has reached its concurrent-key ceiling (see portRangeSize in orchestrator.go)", k.ID, err)
+				log.Printf("[NODEAGENT] key %s not started: %v - this node has reached its concurrent-key ceiling (raise it with --port-range-size, or run another node)", k.ID, err)
 			} else {
 				utils.Debugf("[NODEAGENT] failed to start worker for key %s: %v", k.ID, err)
 			}

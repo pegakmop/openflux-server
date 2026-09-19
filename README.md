@@ -139,6 +139,7 @@ Then set up a SOCKS5 proxy in your browser at localhost:1080.
 | `--node-token`   | ``      | Managed mode: this node's bearer token from controlplane |
 | `--mode`         | `raw`   | Exit node only: `raw` (needs root, general UDP relay) or `proxy` (no root, TCP only) |
 | `--local-ip`     | ``      | Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with `-s` |
+| `--port-range-size` | `96` | Managed raw mode only: outbound ports reserved per concurrent key - lower fits more keys on this node (`~65000/size`), higher tolerates one key opening more simultaneous connections at once (e.g. Telegram loading media) before new ones start failing |
 | `--codec`        | `legacy` | Wire codec for `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (per-packet LZ4, unchanged) or `batched` (coalesce bursts into one zstd-compressed message per transport send - see below). Both ends must agree. Ignored for `yandex`/`yandex_multistream` - see below. |
 
 Ported from upstream [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux):

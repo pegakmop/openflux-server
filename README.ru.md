@@ -141,6 +141,7 @@ sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 | `--node-token`   | ``      | Managed-режим: токен этой ноды, выданный controlplane |
 | `--mode`         | `raw`   | Только для exit-node: `raw` (нужен root, релей обычного UDP) или `proxy` (без root, только TCP) |
 | `--local-ip`     | ``      | Только для raw-режима: egress-IP ноды, чтобы сузить RST-drop правило через `-s` |
+| `--port-range-size` | `96` | Только managed raw-режим: сколько исходящих портов резервировать на один ключ — меньше значение даёт больше ключей на ноде (`~65000/размер`), больше — терпит больше одновременных соединений у одного ключа (например, загрузку медиа в Telegram) до того, как новые начнут отваливаться |
 | `--codec`        | `legacy` | Кодек канала для `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (LZ4 на каждый пакет, без изменений) или `batched` (склеивать пачку исходящих пакетов в одно zstd-сжатое сообщение транспорта — см. ниже). Обе стороны должны совпадать. Игнорируется для `yandex`/`yandex_multistream` — см. ниже. |
 
 Портировано из апстрима [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux):
