@@ -113,6 +113,12 @@ func (e *RawSocketEndpoint) readLoop(fd int, wantProto byte) {
 
 		if protocol == wantProto && dstIP.String() == localIP {
 			ipHeaderLenIn := int(buf[0]&0x0F) * 4
+			// This raw socket sees every TCP/UDP packet on the host, not just tunnel traffic - a
+			// stray or spoofed packet declaring an IHL bigger than what actually arrived would
+			// otherwise panic the slice below and take down the whole process.
+			if ipHeaderLenIn < 20 || n-ipHeaderLenIn < 20 {
+				continue
+			}
 			l4In := buf[ipHeaderLenIn:n]
 			dstPort := uint16(l4In[2])<<8 | uint16(l4In[3])
 

@@ -131,10 +131,30 @@ func newIPRateLimiter(rps float64, burst int) *ipRateLimiter {
 	if burst <= 0 {
 		burst = 1
 	}
-	return &ipRateLimiter{
+	l := &ipRateLimiter{
 		buckets: make(map[string]*bucket),
 		rps:     rps,
 		burst:   burst,
+	}
+	go l.sweepStale()
+	return l
+}
+
+// bucketStaleAfter: a bucket this old is already back at full burst, so evicting it costs nothing - the next request just allocates a fresh one. Every distinct client IP ever seen otherwise stays in the map forever, which is a real leak on a public per-IP endpoint like handleResolve.
+const bucketStaleAfter = 10 * time.Minute
+
+func (l *ipRateLimiter) sweepStale() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		cutoff := time.Now().Add(-bucketStaleAfter)
+		l.mu.Lock()
+		for ip, b := range l.buckets {
+			if b.lastSeen.Before(cutoff) {
+				delete(l.buckets, ip)
+			}
+		}
+		l.mu.Unlock()
 	}
 }
 
