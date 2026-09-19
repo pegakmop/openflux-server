@@ -62,10 +62,15 @@ func NewOrchestrator(cfg Config) *Orchestrator {
 	}
 }
 
-// portRangeSize trades against portAllocator's ceiling on concurrent workers (~2015 at 32); raise only alongside lowering nodes.max_keys, since a range can't be resized once its worker is running.
+// portRangeSize trades against portAllocator's ceiling on concurrent workers (~251 at 256) - a
+// single active key needs more outbound ports than expected in practice (Telegram alone can open
+// several dozen concurrent connections while loading media), so this stays conservative rather than
+// shrunk further for more keys-per-node; scaling past ~250 keys means running more exit nodes, not
+// a smaller range - controlplane already spreads new keys across whichever active node carries the
+// fewest (see CreateKey). Can't be resized once a worker is running (see TCPTunnel.SetPortRange).
 const (
 	portRangeBase = 1025
-	portRangeSize = 32
+	portRangeSize = 256
 	portRangeMax  = 65535
 )
 
