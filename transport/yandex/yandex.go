@@ -780,7 +780,8 @@ func (t *YandexDocsTransport) extractBase64String(response string) string {
 		return response[left : left+right]
 	}
 
-	re := regexp.MustCompile(`"cursor":"[^;]+;([^"]+)"`)
+	// Anchored on our own literal "18;" marker (see sendBatch/sendSingle/etc.), not just any cursor value with a semicolon - a real participant's own cursor broadcast (this is a real collaborative doc, other Yandex users' cursors go out the same "cursor" field) matched the old, looser pattern too, handing their cursor position to CallReceive as if it were tunnel data.
+	re := regexp.MustCompile(`"cursor":"18;([^"]+)"`)
 	matches := re.FindStringSubmatch(response)
 	if len(matches) > 1 {
 		return matches[1]
