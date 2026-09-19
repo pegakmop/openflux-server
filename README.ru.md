@@ -95,23 +95,20 @@ export XCODE_PATH="<путь до вашего Xcode.app>" # опциональ�
 
 RST, которые генерит ядро в raw-режиме, нужно подавлять, но **точечно**, не на весь хост —
 глухой `-j DROP` на все исходящие RST превращает закрытые порты в «молчащие» (сканер видит
-`filtered` вместо `closed`) и мешает хосту сбрасывать свои же посторонние соединения.
-`-m owner --uid-owner` тут не поможет: эти RST генерит ядро без сокета-владельца.
+`filtered` вместо `closed`) и мешает хосту сбрасывать свои же посторонние соединения. Ни
+`-m owner --uid-owner`, ни `-s <ip>` тут не годятся: RST от ядра идёт без сокета-владельца, а
+raw-сокет шлёт свои собственные легитимные RST с того же IP — любой из этих матчей режет оба
+случая разом, и наши же сбросы соединений тихо гасятся EPERM'ом, оставляя реального пира
+уверенным, что соединение всё ещё живо. Raw-сокет метит свои пакеты (`SO_MARK`, см.
+`tunnel/rawsocket_linux.go`) именно для того, чтобы правило могло их различить:
 
 ```bash
-# raw-режим (по умолчанию), сужен на выделенный egress-IP:
-sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s <ваш-alias-ip> -j DROP
-sudo ./universal-bypass-tool --exit-node --local-ip <ваш-alias-ip> --url "YOUR_YANDEX_DOC_URL" --debug
+# raw-режим (по умолчанию):
+sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP
+sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 
 # proxy-режим — без root, без iptables-правила, но и без релея обычного UDP:
 ./universal-bypass-tool --exit-node --mode proxy --url "YOUR_YANDEX_DOC_URL" --debug
-```
-
-Запасной вариант на весь хост для raw-режима (только на однозадачной машине, с пониманием
-последствий выше):
-```bash
-sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
-sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 ```
 
 1. Поддерживается только устаревший редактор документов Yandex (переключается в настройках интерфейса).
@@ -140,7 +137,7 @@ sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 | `--control-url`  | ``      | Managed-режим: базовый URL сервиса `openflux-control` |
 | `--node-token`   | ``      | Managed-режим: токен этой ноды, выданный controlplane |
 | `--mode`         | `raw`   | Только для exit-node: `raw` (нужен root, релей обычного UDP) или `proxy` (без root, только TCP) |
-| `--local-ip`     | ``      | Только для raw-режима: egress-IP ноды, чтобы сузить RST-drop правило через `-s` |
+| `--local-ip`     | ``      | Только для raw-режима: egress-IP ноды, если их на сервере несколько |
 | `--port-range-size` | `96` | Только managed raw-режим: сколько исходящих портов резервировать на один ключ — меньше значение даёт больше ключей на ноде (`~65000/размер`), больше — терпит больше одновременных соединений у одного ключа (например, загрузку медиа в Telegram) до того, как новые начнут отваливаться |
 | `--codec`        | `legacy` | Кодек канала для `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (LZ4 на каждый пакет, без изменений) или `batched` (склеивать пачку исходящих пакетов в одно zstd-сжатое сообщение транспорта — см. ниже). Обе стороны должны совпадать. Игнорируется для `yandex`/`yandex_multistream` — см. ниже. |
 

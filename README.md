@@ -93,23 +93,20 @@ The exit node reaches the real internet in one of two modes (`--mode`):
 Raw mode's kernel-generated RSTs must be suppressed, but **scoped**, not host-wide - a blanket
 `-j DROP` on all outbound RSTs makes every closed port on the box answer with silence (a port
 scanner sees "filtered" instead of "closed") and stops the host resetting any of its own other
-connections. `-m owner --uid-owner` can't fix this: the RSTs are kernel-generated with no
-owning socket, so the owner match never fires.
+connections. Neither `-m owner --uid-owner` nor `-s <ip>` can scope this correctly: the
+kernel-generated RSTs have no owning socket, and the raw socket sends its own legitimate RSTs
+from that same IP too - either match drops both, silently EPERM'ing our own connection resets
+and leaving real peers thinking a torn-down connection is still open. The raw socket marks its
+own packets (`SO_MARK`, see `tunnel/rawsocket_linux.go`) specifically so the rule can tell them
+apart:
 
 ```bash
-# raw mode (default), scoped to a dedicated egress IP:
-sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s <your-alias-ip> -j DROP
-sudo ./universal-bypass-tool --exit-node --local-ip <your-alias-ip> --url "YOUR_YANDEX_DOC_URL" --debug
+# raw mode (default):
+sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP
+sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 
 # proxy mode - no root, no iptables rule, but no general UDP relay either:
 ./universal-bypass-tool --exit-node --mode proxy --url "YOUR_YANDEX_DOC_URL" --debug
-```
-
-Host-wide fallback for raw mode (only on a single-purpose box, understanding the trade-off
-above):
-```bash
-sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
-sudo ./universal-bypass-tool --exit-node --url "YOUR_YANDEX_DOC_URL" --debug
 ```
 
 1. Only the legacy Yandex document editor is supported (toggle this from the interface).
@@ -138,7 +135,7 @@ Then set up a SOCKS5 proxy in your browser at localhost:1080.
 | `--control-url`  | ``      | Managed mode: base URL of the `openflux-control` service |
 | `--node-token`   | ``      | Managed mode: this node's bearer token from controlplane |
 | `--mode`         | `raw`   | Exit node only: `raw` (needs root, general UDP relay) or `proxy` (no root, TCP only) |
-| `--local-ip`     | ``      | Raw mode only: exit node egress IP, so the RST-drop iptables rule can be scoped with `-s` |
+| `--local-ip`     | ``      | Raw mode only: exit node egress IP, for a box with more than one |
 | `--port-range-size` | `96` | Managed raw mode only: outbound ports reserved per concurrent key - lower fits more keys on this node (`~65000/size`), higher tolerates one key opening more simultaneous connections at once (e.g. Telegram loading media) before new ones start failing |
 | `--codec`        | `legacy` | Wire codec for `--transport volga`/`oneme`/`cupsonline`/`mailru`: `legacy` (per-packet LZ4, unchanged) or `batched` (coalesce bursts into one zstd-compressed message per transport send - see below). Both ends must agree. Ignored for `yandex`/`yandex_multistream` - see below. |
 

@@ -18,6 +18,9 @@ import (
 	"universal-bypass-tool/utils"
 )
 
+// rawSocketFwMark tags every packet this process sends via the raw socket - the deploy's iptables RST-drop rule matches on its absence, not on ours (see newRawSocketCore). Must match install.sh's rule exactly.
+const rawSocketFwMark = 0x2547
+
 // rawSocketCore is shared process-wide, not per-worker: a SOCK_RAW socket sees every matching packet regardless of destination port, so N independent readLoops would each parse and mostly discard a full copy of every packet.
 type rawSocketCore struct {
 	sendFd, recvFd, recvUDPFd int
@@ -95,6 +98,11 @@ func newRawSocketCore() (*rawSocketCore, error) {
 	if err := syscall.SetsockoptInt(sendFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
 		syscall.Close(sendFd)
 		return nil, fmt.Errorf("IP_HDRINCL: %v", err)
+	}
+	// fwMark lets the deploy's iptables RST-drop rule (aimed at the kernel's own auto-RST for a raw socket it doesn't own a real connection for) exempt packets we send ourselves - without this, gvisor's own legitimate RSTs get silently EPERM'd too, leaving the real peer thinking the connection is still open.
+	if err := syscall.SetsockoptInt(sendFd, syscall.SOL_SOCKET, syscall.SO_MARK, rawSocketFwMark); err != nil {
+		syscall.Close(sendFd)
+		return nil, fmt.Errorf("SO_MARK: %v", err)
 	}
 
 	recvFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
