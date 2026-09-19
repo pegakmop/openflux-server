@@ -291,8 +291,8 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 				e.core.activePorts.Store(srcPort, e)
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
-				dstPort := uint16(l4[2])<<8 | uint16(l4[3])
-				e.core.activePorts.Delete(dstPort)
+				// Was deleting by dstPort (the remote's port) instead of srcPort (what SYN above actually stores under) - FIN/RST never cleared the entry, so a closed port kept accepting stray traffic.
+				e.core.activePorts.Delete(srcPort)
 			}
 		case 17:
 			// UDP has no handshake or FIN/RST, so the port entry lives until the worker closes or the process exits; no reaper, since there's no way to know how long a quiet UDP flow stays interesting.

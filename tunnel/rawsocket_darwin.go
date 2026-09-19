@@ -200,8 +200,8 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 				e.activePorts.Store(srcPort, true)
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
-				dstPort := uint16(l4[2])<<8 | uint16(l4[3])
-				e.activePorts.Delete(dstPort)
+				// Was deleting by dstPort (the remote's port) instead of srcPort (what SYN above actually stores under) - FIN/RST never cleared the entry, so a closed port kept accepting stray traffic.
+				e.activePorts.Delete(srcPort)
 			}
 		case 17:
 			// UDP has neither a handshake nor FIN/RST: the first datagram opens the port.
