@@ -23,8 +23,25 @@ type rawSocketCore struct {
 	sendFd, recvFd, recvUDPFd int
 	localIP                   [4]byte
 
-	outgoingSYNs sync.Map // seq uint32 -> struct{}
+	outgoingSYNs sync.Map // seq uint32 -> time.Time (sent-at, swept by sweepStaleSYNs)
 	activePorts  sync.Map // port uint16 -> *RawSocketEndpoint (the owning worker)
+}
+
+// syn2Ack is how long an outgoing SYN waits for a reply before sweepStaleSYNs treats it as dead - a refused (RST) or blackholed connect never hits the SYN-ACK delete path, so without this the map leaks one entry per failed dial forever, node-wide.
+const synStaleAfter = 30 * time.Second
+
+func (c *rawSocketCore) sweepStaleSYNs() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		cutoff := time.Now().Add(-synStaleAfter)
+		c.outgoingSYNs.Range(func(key, value any) bool {
+			if sentAt, ok := value.(time.Time); ok && sentAt.Before(cutoff) {
+				c.outgoingSYNs.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 var (
@@ -63,6 +80,7 @@ func getSharedRawCore() (*rawSocketCore, error) {
 			for i := 0; i < n; i++ {
 				go sharedRawCore.readLoop(sharedRawCore.recvUDPFd, 17)
 			}
+			go sharedRawCore.sweepStaleSYNs()
 		}
 	})
 	return sharedRawCore, sharedRawCoreErr
@@ -255,7 +273,7 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 		case 6:
 			if l4[13]&0x02 != 0 {
 				seqNum := uint32(l4[4])<<24 | uint32(l4[5])<<16 | uint32(l4[6])<<8 | uint32(l4[7])
-				e.core.outgoingSYNs.Store(seqNum, true)
+				e.core.outgoingSYNs.Store(seqNum, time.Now())
 				e.core.activePorts.Store(srcPort, e)
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
