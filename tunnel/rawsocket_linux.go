@@ -27,8 +27,18 @@ type rawSocketCore struct {
 	localIP                   [4]byte
 
 	outgoingSYNs sync.Map // seq uint32 -> time.Time (sent-at, swept by sweepStaleSYNs)
-	activePorts  sync.Map // port uint16 -> *RawSocketEndpoint (the owning worker)
+	activePorts  sync.Map // port uint16 -> activePortBinding
+	portGen      atomic.Uint64
 }
+
+// activePortBinding pairs the owning worker with a generation tag so a delayed FIN/RST eviction can tell "still this connection" from "this port got reused since" and skip the delete in the latter case.
+type activePortBinding struct {
+	owner *RawSocketEndpoint
+	gen   uint64
+}
+
+// portCloseGrace: TCP allows half-close - the side that sent FIN can still be waiting on the peer's own data/FIN - so evicting the port the instant we relay our own FIN/RST out would drop a real, still-expected reply as "port not active". Delaying the evict gives that tail traffic a window to still get through.
+const portCloseGrace = 2 * time.Second
 
 // syn2Ack is how long an outgoing SYN waits for a reply before sweepStaleSYNs treats it as dead - a refused (RST) or blackholed connect never hits the SYN-ACK delete path, so without this the map leaks one entry per failed dial forever, node-wide.
 const synStaleAfter = 30 * time.Second
@@ -190,7 +200,7 @@ func (c *rawSocketCore) readLoop(fd int, wantProto byte) {
 			if !active {
 				continue
 			}
-			owner := v.(*RawSocketEndpoint)
+			owner := v.(activePortBinding).owner
 
 			if protocol == 6 && l4In[13] == 0x12 {
 				ackNum := uint32(l4In[8])<<24 | uint32(l4In[9])<<16 | uint32(l4In[10])<<8 | uint32(l4In[11])
@@ -288,15 +298,21 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 			if l4[13]&0x02 != 0 {
 				seqNum := uint32(l4[4])<<24 | uint32(l4[5])<<16 | uint32(l4[6])<<8 | uint32(l4[7])
 				e.core.outgoingSYNs.Store(seqNum, time.Now())
-				e.core.activePorts.Store(srcPort, e)
+				e.core.activePorts.Store(srcPort, activePortBinding{owner: e, gen: e.core.portGen.Add(1)})
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
-				// Was deleting by dstPort (the remote's port) instead of srcPort (what SYN above actually stores under) - FIN/RST never cleared the entry, so a closed port kept accepting stray traffic.
-				e.core.activePorts.Delete(srcPort)
+				// Delayed, generation-checked: an immediate delete would drop a still-expected reply on a half-closed connection (FIN sent, still waiting on the peer). CompareAndDelete no-ops if this port got reused for a new connection before the grace period elapsed.
+				if v, ok := e.core.activePorts.Load(srcPort); ok {
+					binding := v.(activePortBinding)
+					core := e.core
+					time.AfterFunc(portCloseGrace, func() {
+						core.activePorts.CompareAndDelete(srcPort, binding)
+					})
+				}
 			}
 		case 17:
 			// UDP has no handshake or FIN/RST, so the port entry lives until the worker closes or the process exits; no reaper, since there's no way to know how long a quiet UDP flow stays interesting.
-			e.core.activePorts.Store(srcPort, e)
+			e.core.activePorts.Store(srcPort, activePortBinding{owner: e, gen: e.core.portGen.Add(1)})
 		}
 
 		var dst [4]byte
@@ -335,7 +351,7 @@ func (e *RawSocketEndpoint) AddHeader(*stack.PacketBuffer)           {}
 // Close only sweeps this worker's own port registrations - the shared OS sockets outlive it - since a stale entry could otherwise point at a dead worker indefinitely (harmless for TCP, an unbounded leak for UDP).
 func (e *RawSocketEndpoint) Close() {
 	e.core.activePorts.Range(func(key, value any) bool {
-		if value.(*RawSocketEndpoint) == e {
+		if value.(activePortBinding).owner == e {
 			e.core.activePorts.Delete(key)
 		}
 		return true

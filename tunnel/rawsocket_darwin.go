@@ -26,9 +26,13 @@ type RawSocketEndpoint struct {
 	packetIn        atomic.Uint64
 	packetOut       atomic.Uint64
 	outgoingSYNs    sync.Map
-	activePorts     sync.Map
+	activePorts     sync.Map // port uint16 -> generation uint64
+	portGen         atomic.Uint64
 	sendToTransport func([]byte)
 }
+
+// portCloseGrace: TCP allows half-close - the side that sent FIN can still be waiting on the peer's own data/FIN - so evicting the port the instant we relay our own FIN/RST out would drop a real, still-expected reply as "port not active". Delaying the evict gives that tail traffic a window to still get through.
+const portCloseGrace = 2 * time.Second
 
 func NewRawSocketEndpoint(nicID tcpip.NICID) (*RawSocketEndpoint, error) {
 	sendFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
@@ -197,15 +201,19 @@ func (e *RawSocketEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpi
 			if l4[13]&0x02 != 0 {
 				seqNum := uint32(l4[4])<<24 | uint32(l4[5])<<16 | uint32(l4[6])<<8 | uint32(l4[7])
 				e.outgoingSYNs.Store(seqNum, true)
-				e.activePorts.Store(srcPort, true)
+				e.activePorts.Store(srcPort, e.portGen.Add(1))
 			}
 			if l4[13]&0x01 != 0 || l4[13]&0x04 != 0 {
-				// Was deleting by dstPort (the remote's port) instead of srcPort (what SYN above actually stores under) - FIN/RST never cleared the entry, so a closed port kept accepting stray traffic.
-				e.activePorts.Delete(srcPort)
+				// Delayed, generation-checked: an immediate delete would drop a still-expected reply on a half-closed connection (FIN sent, still waiting on the peer). CompareAndDelete no-ops if this port got reused for a new connection before the grace period elapsed.
+				if gen, ok := e.activePorts.Load(srcPort); ok {
+					time.AfterFunc(portCloseGrace, func() {
+						e.activePorts.CompareAndDelete(srcPort, gen)
+					})
+				}
 			}
 		case 17:
 			// UDP has neither a handshake nor FIN/RST: the first datagram opens the port.
-			e.activePorts.Store(srcPort, true)
+			e.activePorts.Store(srcPort, e.portGen.Add(1))
 		}
 
 		var dst [4]byte
