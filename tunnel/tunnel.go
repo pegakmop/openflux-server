@@ -300,6 +300,11 @@ func (t *TCPTunnel) ExitMode() ExitMode {
 	return t.exitMode
 }
 
+// SetMTU overrides the tunnel virtual link's default 1500 - a caller relaying through a constrained real path (mobile network, a smaller TUN device MTU) should match it here too, or gvisor keeps building segments this link can't actually get through.
+func (t *TCPTunnel) SetMTU(mtu uint32) {
+	t.tunnelEP.SetMTU(mtu)
+}
+
 // SetPortRange gives every worker a disjoint port range: since all raw-mode workers share one real IP and raw socket, overlapping ranges could deliver one key's real traffic into another's tunnel.
 func (t *TCPTunnel) SetPortRange(start, end uint16) {
 	if err := t.gvisorStack.SetPortRange(start, end); err != nil {

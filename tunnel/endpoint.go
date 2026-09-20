@@ -15,16 +15,22 @@ import (
 	"universal-bypass-tool/utils"
 )
 
+// defaultMTU matches a full Ethernet frame; SetMTU overrides it to match whatever the real path (a mobile network, a constrained TUN device) can actually carry, so gvisor doesn't build segments this link then can't deliver.
+const defaultMTU = 1500
+
 type TunnelLinkEndpoint struct {
 	dispatcherMu     sync.RWMutex
 	dispatcher       stack.NetworkDispatcher
 	onOutgoingPacket func([]byte)
 	packetIn         atomic.Uint64
 	packetOut        atomic.Uint64
+	mtu              atomic.Uint32
 }
 
 func NewTunnelLinkEndpoint() *TunnelLinkEndpoint {
-	return &TunnelLinkEndpoint{}
+	e := &TunnelLinkEndpoint{}
+	e.mtu.Store(defaultMTU)
+	return e
 }
 
 func (e *TunnelLinkEndpoint) PacketCounts() (in, out uint64) {
@@ -81,7 +87,7 @@ func (e *TunnelLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcp
 	return n, nil
 }
 
-func (e *TunnelLinkEndpoint) MTU() uint32                    { return 1500 }
+func (e *TunnelLinkEndpoint) MTU() uint32                    { return e.mtu.Load() }
 func (e *TunnelLinkEndpoint) MaxHeaderLength() uint16        { return 0 }
 func (e *TunnelLinkEndpoint) LinkAddress() tcpip.LinkAddress { return "\x02\x00\x00\x00\x00\x01" }
 func (e *TunnelLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
@@ -101,7 +107,11 @@ func (e *TunnelLinkEndpoint) Wait()                                   {}
 func (e *TunnelLinkEndpoint) ARPHardwareType() header.ARPHardwareType { return header.ARPHardwareNone }
 func (e *TunnelLinkEndpoint) AddHeader(*stack.PacketBuffer)           {}
 func (e *TunnelLinkEndpoint) Close()                                  {}
-func (e *TunnelLinkEndpoint) SetMTU(uint32)                           {}
-func (e *TunnelLinkEndpoint) SetLinkAddress(tcpip.LinkAddress)        {}
-func (e *TunnelLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool    { return true }
-func (e *TunnelLinkEndpoint) SetOnCloseAction(func())                 {}
+func (e *TunnelLinkEndpoint) SetMTU(mtu uint32) {
+	if mtu > 0 {
+		e.mtu.Store(mtu)
+	}
+}
+func (e *TunnelLinkEndpoint) SetLinkAddress(tcpip.LinkAddress)     {}
+func (e *TunnelLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool { return true }
+func (e *TunnelLinkEndpoint) SetOnCloseAction(func())              {}

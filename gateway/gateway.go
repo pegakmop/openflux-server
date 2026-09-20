@@ -48,6 +48,12 @@ type Server struct {
 	gvisorStack *stack.Stack
 	linkEP      *tunnel.TunnelLinkEndpoint
 	closed      atomic.Bool
+	mtu         uint32
+}
+
+// SetMTU overrides the gateway NIC's default 1500 - call before Start(). Should match whatever real device interface is feeding this gateway's TUN reader, or gvisor here builds segments that link can't actually carry.
+func (s *Server) SetMTU(mtu uint32) {
+	s.mtu = mtu
 }
 
 func NewServer(dialer Dialer, dnsUpstream string) *Server {
@@ -97,6 +103,9 @@ func (s *Server) Start(tunReader io.Reader, tunWriter io.Writer) error {
 	})
 
 	linkEP := tunnel.NewTunnelLinkEndpoint()
+	if s.mtu > 0 {
+		linkEP.SetMTU(s.mtu)
+	}
 	linkEP.SetOutgoingPacketHandler(func(data []byte) {
 		if _, err := tunWriter.Write(data); err != nil {
 			utils.Debugf("[GATEWAY] tun write error: %v", err)

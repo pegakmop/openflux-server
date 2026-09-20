@@ -141,6 +141,9 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	}
 
 	tun := tunnel.NewTCPTunnel(trans, false)
+	if cfg.MTU > 0 {
+		tun.SetMTU(uint32(cfg.MTU))
+	}
 
 	tunFile := os.NewFile(uintptr(tunFd), "tun")
 	if tunFile == nil {
@@ -150,6 +153,9 @@ func StartTunnel(tunFd int, configJSON string, protector Protector, cb Callback)
 	}
 
 	gw := gateway.NewServerWithPolicy(tun, cfg.DNSUpstream, sitePolicy(cfg))
+	if cfg.MTU > 0 {
+		gw.SetMTU(uint32(cfg.MTU))
+	}
 	if err := gw.Start(tunFile, tunFile); err != nil {
 		trans.Stop()
 		tun.Close()
@@ -246,6 +252,9 @@ func StartSocks5Proxy(configJSON string, listenAddr string, cb Callback) error {
 	}
 
 	tun := tunnel.NewTCPTunnel(trans, false)
+	if cfg.MTU > 0 {
+		tun.SetMTU(uint32(cfg.MTU))
+	}
 	server := socks5.NewSOCKS5Server(listenAddr, tun)
 
 	s := &socks5Session{trans: trans, tun: tun, server: server}
