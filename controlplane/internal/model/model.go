@@ -10,6 +10,8 @@ type Node struct {
 	LastHeartbeatAt *time.Time
 	CreatedAt       time.Time
 	ActiveKeys      int
+	// PublicAddress is admin-provided (host or IP, no port) - needed only as a cascade's final-exit target, so an entry node knows where to relay to.
+	PublicAddress *string
 }
 
 type Key struct {
@@ -29,6 +31,9 @@ type Key struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	LastSeenAt         *time.Time
+	// FinalExitNodeID/RelayPort make this a cascade: the assigned (entry) node relays to this node's RelayPort instead of dialing the real internet itself. Both nil/unset means today's direct-exit behavior.
+	FinalExitNodeID *string
+	RelayPort       *int
 }
 
 func (k Key) BytesUsedTotal() int64 {

@@ -36,11 +36,33 @@ type RemoteKey struct {
 	Token             string   `json:"token,omitempty"`
 	// E2EEncryption mirrors the key's e2e_encryption setting; startWorker only wraps the transport in EncryptedTransport when this is true, making the setting binding rather than advisory.
 	E2EEncryption bool `json:"e2e_encryption,omitempty"`
+	// RelayHost/RelayPort set means this key is cascaded: relay to that address over UDP instead of dialing the real internet on this node.
+	RelayHost *string `json:"relay_host,omitempty"`
+	RelayPort *int    `json:"relay_port,omitempty"`
+}
+
+func (k RemoteKey) IsRelayed() bool {
+	return k.RelayHost != nil && k.RelayPort != nil
 }
 
 func (c *ControlClient) ListKeys(ctx context.Context) ([]RemoteKey, error) {
 	var out []RemoteKey
 	if err := c.do(ctx, http.MethodGet, "/v1/nodes/keys", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RelayExitKey is the final-exit half of a cascade - see RemoteKey.RelayHost/RelayPort on the entry side.
+type RelayExitKey struct {
+	ID        string `json:"id"`
+	Token     string `json:"token"`
+	RelayPort int    `json:"relay_port"`
+}
+
+func (c *ControlClient) ListRelayExitKeys(ctx context.Context) ([]RelayExitKey, error) {
+	var out []RelayExitKey
+	if err := c.do(ctx, http.MethodGet, "/v1/nodes/relay-keys", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

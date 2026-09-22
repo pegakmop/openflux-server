@@ -28,9 +28,9 @@ func (s *Store) CreateNode(ctx context.Context, name, secretHash string, maxKeys
 func (s *Store) GetNodeByID(ctx context.Context, id string) (model.Node, error) {
 	var n model.Node
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, max_keys, status, last_heartbeat_at, created_at
+		SELECT id, name, max_keys, status, last_heartbeat_at, created_at, public_address
 		FROM nodes WHERE id = $1
-	`, id).Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt)
+	`, id).Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt, &n.PublicAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Node{}, ErrNotFound
 	}
@@ -43,9 +43,9 @@ func (s *Store) GetNodeByID(ctx context.Context, id string) (model.Node, error) 
 func (s *Store) GetNodeBySecretHash(ctx context.Context, secretHash string) (model.Node, error) {
 	var n model.Node
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, max_keys, status, last_heartbeat_at, created_at
+		SELECT id, name, max_keys, status, last_heartbeat_at, created_at, public_address
 		FROM nodes WHERE secret_hash = $1 AND status = 'active'
-	`, secretHash).Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt)
+	`, secretHash).Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt, &n.PublicAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Node{}, ErrNotFound
 	}
@@ -57,7 +57,7 @@ func (s *Store) GetNodeBySecretHash(ctx context.Context, secretHash string) (mod
 
 func (s *Store) ListNodes(ctx context.Context) ([]model.Node, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT n.id, n.name, n.max_keys, n.status, n.last_heartbeat_at, n.created_at,
+		SELECT n.id, n.name, n.max_keys, n.status, n.last_heartbeat_at, n.created_at, n.public_address,
 		       count(k.id) FILTER (WHERE k.enabled) AS active_keys
 		FROM nodes n
 		LEFT JOIN keys k ON k.assigned_node_id = n.id
@@ -72,12 +72,23 @@ func (s *Store) ListNodes(ctx context.Context) ([]model.Node, error) {
 	var out []model.Node
 	for rows.Next() {
 		var n model.Node
-		if err := rows.Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt, &n.ActiveKeys); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.MaxKeys, &n.Status, &n.LastHeartbeatAt, &n.CreatedAt, &n.PublicAddress, &n.ActiveKeys); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) SetNodePublicAddress(ctx context.Context, id, addr string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE nodes SET public_address = NULLIF($1, '') WHERE id = $2`, addr, id)
+	if err != nil {
+		return fmt.Errorf("set node public_address: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) RotateNodeSecret(ctx context.Context, id, newSecretHash string) error {

@@ -63,7 +63,8 @@ func (a *App) handleListNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 type patchNodeRequest struct {
-	MaxKeys int `json:"max_keys"`
+	MaxKeys       *int    `json:"max_keys,omitempty"`
+	PublicAddress *string `json:"public_address,omitempty"`
 }
 
 func (a *App) handlePatchNode(w http.ResponseWriter, r *http.Request) {
@@ -72,17 +73,30 @@ func (a *App) handlePatchNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if req.MaxKeys <= 0 {
-		writeError(w, http.StatusBadRequest, "max_keys must be positive")
-		return
+	id := r.PathValue("id")
+
+	if req.MaxKeys != nil {
+		if *req.MaxKeys <= 0 {
+			writeError(w, http.StatusBadRequest, "max_keys must be positive")
+			return
+		}
+		if err := a.Store.SetNodeMaxKeys(r.Context(), id, *req.MaxKeys); err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, "node not found")
+			return
+		} else if err != nil {
+			writeInternalError(w, r, "update node failed", err)
+			return
+		}
 	}
 
-	if err := a.Store.SetNodeMaxKeys(r.Context(), r.PathValue("id"), req.MaxKeys); err == store.ErrNotFound {
-		writeError(w, http.StatusNotFound, "node not found")
-		return
-	} else if err != nil {
-		writeInternalError(w, r, "update node failed", err)
-		return
+	if req.PublicAddress != nil {
+		if err := a.Store.SetNodePublicAddress(r.Context(), id, *req.PublicAddress); err == store.ErrNotFound {
+			writeError(w, http.StatusNotFound, "node not found")
+			return
+		} else if err != nil {
+			writeInternalError(w, r, "update node failed", err)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -257,6 +271,36 @@ func (a *App) handlePatchKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+type patchKeyFinalExitRequest struct {
+	FinalExitNodeID *string `json:"final_exit_node_id"`
+}
+
+// handlePatchKeyFinalExit builds (or tears down) a cascade for one key: set final_exit_node_id to
+// route this key's traffic through a second node's raw exit instead of the assigned node dialing
+// the real internet itself; null clears it back to direct-exit.
+func (a *App) handlePatchKeyFinalExit(w http.ResponseWriter, r *http.Request) {
+	var req patchKeyFinalExitRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	k, err := a.Store.SetKeyFinalExit(r.Context(), r.PathValue("id"), req.FinalExitNodeID)
+	if err == store.ErrNotFound {
+		writeError(w, http.StatusNotFound, "key or final-exit node not found")
+		return
+	}
+	if err == store.ErrNoFinalExitAddress {
+		writeError(w, http.StatusConflict, "that node has no public_address set yet - add one before using it as a final exit")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, r, "set key final exit failed", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
 }
 
 func (a *App) handleDeleteKey(w http.ResponseWriter, r *http.Request) {

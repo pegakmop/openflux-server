@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +42,13 @@ func DefaultConfig(controlURL, nodeToken string) Config {
 	}
 }
 
+// worker is normally a client-facing (Yandex) transport paired with its own raw/proxy exit tunnel.
+// For a cascaded key, tun is nil and relayTo holds the UDP link to the final-exit node instead - trans
+// still means the Yandex side, so usage accounting (based on trans.Stats()) is unaffected either way.
 type worker struct {
 	trans   transport.Transport
 	tun     *tunnel.TCPTunnel
+	relayTo transport.Transport
 	docURL  string
 	portIdx int
 
@@ -50,13 +56,21 @@ type worker struct {
 	lastRecv uint64
 }
 
+// relayExitWorker is the other half of a cascade: it never talks to Yandex at all, just accepts the entry node's relayed traffic and runs a normal raw/proxy exit for it.
+type relayExitWorker struct {
+	trans   transport.Transport
+	tun     *tunnel.TCPTunnel
+	portIdx int
+}
+
 type Orchestrator struct {
 	client *ControlClient
 	cfg    Config
 
-	mu      sync.Mutex
-	workers map[string]*worker
-	ports   portAllocator
+	mu               sync.Mutex
+	workers          map[string]*worker
+	relayExitWorkers map[string]*relayExitWorker
+	ports            portAllocator
 }
 
 func NewOrchestrator(cfg Config) *Orchestrator {
@@ -65,10 +79,11 @@ func NewOrchestrator(cfg Config) *Orchestrator {
 		rangeSize = DefaultPortRangeSize
 	}
 	return &Orchestrator{
-		client:  NewControlClient(cfg.ControlURL, cfg.NodeToken),
-		cfg:     cfg,
-		workers: make(map[string]*worker),
-		ports:   portAllocator{rangeSize: rangeSize},
+		client:           NewControlClient(cfg.ControlURL, cfg.NodeToken),
+		cfg:              cfg,
+		workers:          make(map[string]*worker),
+		relayExitWorkers: make(map[string]*relayExitWorker),
+		ports:            portAllocator{rangeSize: rangeSize},
 	}
 }
 
@@ -133,6 +148,10 @@ func (o *Orchestrator) Run(ctx context.Context) {
 		o.stopWorker(w)
 		delete(o.workers, id)
 	}
+	for id, w := range o.relayExitWorkers {
+		o.stopRelayExitWorker(w)
+		delete(o.relayExitWorkers, id)
+	}
 }
 
 func (o *Orchestrator) pollLoop(ctx context.Context) {
@@ -153,6 +172,8 @@ func (o *Orchestrator) pollLoop(ctx context.Context) {
 const workerStartStagger = 150 * time.Millisecond
 
 func (o *Orchestrator) reconcile(ctx context.Context) {
+	o.reconcileRelayExits(ctx)
+
 	keys, err := o.client.ListKeys(ctx)
 	if err != nil {
 		utils.Debugf("[NODEAGENT] list keys failed: %v", err)
@@ -218,7 +239,126 @@ func (o *Orchestrator) reconcile(ctx context.Context) {
 	}
 }
 
+// reconcileRelayExits is the final-exit half of a cascade, polled on the same tick as the regular
+// entry-role reconcile above - a physical node can serve either role, or both, for different keys.
+func (o *Orchestrator) reconcileRelayExits(ctx context.Context) {
+	keys, err := o.client.ListRelayExitKeys(ctx)
+	if err != nil {
+		utils.Debugf("[NODEAGENT] list relay exit keys failed: %v", err)
+		return
+	}
+
+	active := make(map[string]RelayExitKey, len(keys))
+	for _, k := range keys {
+		active[k.ID] = k
+	}
+
+	o.mu.Lock()
+	for id, w := range o.relayExitWorkers {
+		if _, stillActive := active[id]; !stillActive {
+			utils.Debugf("[NODEAGENT] stopping relay-exit worker for key %s (no longer active)", id)
+			o.stopRelayExitWorker(w)
+			delete(o.relayExitWorkers, id)
+		}
+	}
+	var toStart []RelayExitKey
+	for id, k := range active {
+		if _, exists := o.relayExitWorkers[id]; !exists {
+			toStart = append(toStart, k)
+		}
+	}
+	o.mu.Unlock()
+
+	for _, k := range toStart {
+		w, err := o.startRelayExitWorker(k)
+		if err != nil {
+			utils.Debugf("[NODEAGENT] failed to start relay-exit worker for key %s: %v", k.ID, err)
+			continue
+		}
+		utils.Debugf("[NODEAGENT] started relay-exit worker for key %s", k.ID)
+		o.mu.Lock()
+		o.relayExitWorkers[k.ID] = w
+		o.mu.Unlock()
+	}
+}
+
+func (o *Orchestrator) startRelayExitWorker(k RelayExitKey) (*relayExitWorker, error) {
+	portIdx := -1
+	var portStart, portEnd uint16
+	if o.cfg.ExitMode == tunnel.ExitModeRaw {
+		var ok bool
+		portIdx, portStart, portEnd, ok = o.ports.alloc()
+		if !ok {
+			return nil, fmt.Errorf("no port range capacity left on this node")
+		}
+	}
+
+	relay := transport.NewUDPRelayTransport(net.JoinHostPort("0.0.0.0", strconv.Itoa(k.RelayPort)), "", k.Token, false, transport.DefaultConfig())
+	if err := relay.Start(); err != nil {
+		if portIdx >= 0 {
+			o.ports.release(portIdx)
+		}
+		return nil, fmt.Errorf("start relay listener: %w", err)
+	}
+
+	tun := tunnel.NewTCPTunnelMode(relay, true, o.cfg.ExitMode)
+	if portIdx >= 0 {
+		tun.SetPortRange(portStart, portEnd)
+	}
+	return &relayExitWorker{trans: relay, tun: tun, portIdx: portIdx}, nil
+}
+
+func (o *Orchestrator) stopRelayExitWorker(w *relayExitWorker) {
+	w.trans.Stop()
+	w.tun.Close()
+	if w.portIdx >= 0 {
+		o.ports.release(w.portIdx)
+	}
+}
+
+// startRelayBridgeWorker is the entry half of a cascade: it never touches raw sockets or gvisor at
+// all, just pipes decoded bytes between the client-facing Yandex transport and the UDP link to the
+// final-exit node, which is the one that actually dials the real internet.
+func (o *Orchestrator) startRelayBridgeWorker(k RemoteKey) (*worker, error) {
+	if k.Transport != "yandex" {
+		return nil, fmt.Errorf("key %s: cascade only supports the yandex transport today", k.ID)
+	}
+	// E2E is meant to hide payload from anyone but the client and the final exit - an entry node that unwrapped it here would defeat that, so cascade+E2E is refused rather than silently getting the boundary wrong.
+	if k.E2EEncryption {
+		return nil, fmt.Errorf("key %s: e2e_encryption + cascade isn't supported yet (the final-exit node would need to own the E2E unwrap, not this one)", k.ID)
+	}
+
+	yd := yandex.NewYandexDocsTransport(k.DocURL, transport.DefaultConfig())
+	yd.EnableSelfCompression()
+	if err := yd.Start(); err != nil {
+		return nil, err
+	}
+
+	relay := transport.NewUDPRelayTransport(":0", net.JoinHostPort(*k.RelayHost, strconv.Itoa(*k.RelayPort)), k.Token, true, transport.DefaultConfig())
+	if err := relay.Start(); err != nil {
+		yd.Stop()
+		return nil, fmt.Errorf("start relay link: %w", err)
+	}
+
+	yd.Receive(func(data []byte) {
+		if err := relay.Send(data); err != nil {
+			utils.Debugf("[NODEAGENT] relay send failed for key %s: %v", k.ID, err)
+		}
+	})
+	relay.Receive(func(data []byte) {
+		if err := yd.Send(data); err != nil {
+			utils.Debugf("[NODEAGENT] yandex send failed for key %s: %v", k.ID, err)
+		}
+	})
+
+	return &worker{trans: yd, relayTo: relay, docURL: k.DocURL, portIdx: -1}, nil
+}
+
 func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
+	if k.IsRelayed() {
+		return o.startRelayBridgeWorker(k)
+	}
+
 	// Raw mode needs a disjoint port range per worker (see TCPTunnel.SetPortRange); proxy mode's plain net.Dial needs no such reservation.
 	portIdx := -1
 	var portStart, portEnd uint16
@@ -279,7 +419,12 @@ func (o *Orchestrator) startWorker(k RemoteKey) (*worker, error) {
 
 func (o *Orchestrator) stopWorker(w *worker) {
 	w.trans.Stop()
-	w.tun.Close()
+	if w.tun != nil {
+		w.tun.Close()
+	}
+	if w.relayTo != nil {
+		w.relayTo.Stop()
+	}
 	if w.portIdx >= 0 {
 		o.ports.release(w.portIdx)
 	}

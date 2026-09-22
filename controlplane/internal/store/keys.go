@@ -31,14 +31,14 @@ func scanKey(row pgx.Row) (model.Key, error) {
 	err := row.Scan(
 		&k.ID, &k.Label, &k.Transport, &k.DocURL, &k.DocURLs, &k.E2EEncryption, &k.AssignedNodeID, &k.Enabled,
 		&k.TrafficLimitBytes, &k.BytesSentTotal, &k.BytesReceivedTotal, &k.OwnerRef,
-		&k.ExpiresAt, &k.CreatedAt, &k.UpdatedAt, &k.LastSeenAt,
+		&k.ExpiresAt, &k.CreatedAt, &k.UpdatedAt, &k.LastSeenAt, &k.FinalExitNodeID, &k.RelayPort,
 	)
 	return k, err
 }
 
 const keyColumns = `id, label, transport, doc_url, doc_urls, e2e_encryption, assigned_node_id, enabled,
 	traffic_limit_bytes, bytes_sent_total, bytes_received_total, owner_ref,
-	expires_at, created_at, updated_at, last_seen_at`
+	expires_at, created_at, updated_at, last_seen_at, final_exit_node_id, relay_port`
 
 // CreateKey best-effort assigns the new key to whichever active node currently carries the fewest enabled keys, keeping the fleet roughly balanced without a separate scheduler.
 func (s *Store) CreateKey(ctx context.Context, p CreateKeyParams) (model.Key, error) {
@@ -96,14 +96,19 @@ type NodeKey struct {
 	BytesReceivedTotal int64
 	TokenEnc           []byte
 	E2EEncryption      bool
+	// RelayPort/RelayHost are set only for a cascaded key: the entry node relays to RelayHost:RelayPort instead of dialing the real internet itself.
+	RelayPort *int
+	RelayHost *string
 }
 
 func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]NodeKey, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, doc_url, doc_urls, transport, traffic_limit_bytes, bytes_sent_total, bytes_received_total, token_enc, e2e_encryption
-		FROM keys
-		WHERE assigned_node_id = $1 AND enabled = true AND deleted_at IS NULL
-		ORDER BY created_at
+		SELECT k.id, k.doc_url, k.doc_urls, k.transport, k.traffic_limit_bytes, k.bytes_sent_total, k.bytes_received_total,
+		       k.token_enc, k.e2e_encryption, k.relay_port, fx.public_address
+		FROM keys k
+		LEFT JOIN nodes fx ON fx.id = k.final_exit_node_id
+		WHERE k.assigned_node_id = $1 AND k.enabled = true AND k.deleted_at IS NULL
+		ORDER BY k.created_at
 	`, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("list node keys: %w", err)
@@ -114,12 +119,106 @@ func (s *Store) ListActiveKeysForNode(ctx context.Context, nodeID string) ([]Nod
 	for rows.Next() {
 		var k NodeKey
 		if err := rows.Scan(&k.ID, &k.DocURL, &k.DocURLs, &k.Transport, &k.TrafficLimitBytes,
-			&k.BytesSentTotal, &k.BytesReceivedTotal, &k.TokenEnc, &k.E2EEncryption); err != nil {
+			&k.BytesSentTotal, &k.BytesReceivedTotal, &k.TokenEnc, &k.E2EEncryption, &k.RelayPort, &k.RelayHost); err != nil {
 			return nil, fmt.Errorf("scan node key: %w", err)
 		}
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+// RelayExitKey is what a final-exit node needs: just enough to derive the relay link's key and open its own listener - never doc_url/doc_urls, since it never talks to Yandex at all.
+type RelayExitKey struct {
+	ID        string
+	TokenEnc  []byte
+	RelayPort int
+}
+
+// ListActiveRelayExitKeysForNode is the other half of a cascade: keys whose final_exit_node_id is this node, filtered the same way as ListActiveKeysForNode so a key disabled (e.g. over quota, reported by the entry node) drops out here too on the next poll.
+func (s *Store) ListActiveRelayExitKeysForNode(ctx context.Context, nodeID string) ([]RelayExitKey, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, token_enc, relay_port
+		FROM keys
+		WHERE final_exit_node_id = $1 AND enabled = true AND deleted_at IS NULL AND relay_port IS NOT NULL
+		ORDER BY created_at
+	`, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list relay exit keys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RelayExitKey
+	for rows.Next() {
+		var k RelayExitKey
+		if err := rows.Scan(&k.ID, &k.TokenEnc, &k.RelayPort); err != nil {
+			return nil, fmt.Errorf("scan relay exit key: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// ErrNoFinalExitAddress means the target node has no public_address set yet - can't build a cascade to a node the admin hasn't told us how to reach.
+var ErrNoFinalExitAddress = errors.New("final exit node has no public_address set")
+
+// SetKeyFinalExit sets or clears a key's cascade target. Setting it allocates the next free relay_port among keys already routed to that same final-exit node (a fresh, small, per-node-pair range - not the same numbering as any single node's own raw-mode port allocator); clearing (nodeID == nil) frees the port back for reuse implicitly, since a future SetKeyFinalExit call just recomputes the max.
+func (s *Store) SetKeyFinalExit(ctx context.Context, id string, finalExitNodeID *string) (model.Key, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return model.Key{}, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if finalExitNodeID == nil {
+		row := tx.QueryRow(ctx, `
+			UPDATE keys SET final_exit_node_id = NULL, relay_port = NULL, updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+			RETURNING `+keyColumns, id)
+		k, err := scanKey(row)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Key{}, ErrNotFound
+		}
+		if err != nil {
+			return model.Key{}, fmt.Errorf("clear key final exit: %w", err)
+		}
+		return k, tx.Commit(ctx)
+	}
+
+	var publicAddress *string
+	if err := tx.QueryRow(ctx, `SELECT public_address FROM nodes WHERE id = $1`, *finalExitNodeID).Scan(&publicAddress); errors.Is(err, pgx.ErrNoRows) {
+		return model.Key{}, ErrNotFound
+	} else if err != nil {
+		return model.Key{}, fmt.Errorf("check final exit node: %w", err)
+	}
+	if publicAddress == nil || *publicAddress == "" {
+		return model.Key{}, ErrNoFinalExitAddress
+	}
+
+	// relayPortBase/Max: a small dedicated range distinct from raw mode's own 1025-65535 ephemeral allocation - this port is for the entry<->final-exit UDP link itself, one per cascaded key sharing that final-exit node.
+	const relayPortBase, relayPortMax = 41000, 41999
+	var nextPort int
+	if err := tx.QueryRow(ctx, `
+		SELECT coalesce(max(relay_port), $2 - 1) + 1
+		FROM keys WHERE final_exit_node_id = $1
+	`, *finalExitNodeID, relayPortBase).Scan(&nextPort); err != nil {
+		return model.Key{}, fmt.Errorf("allocate relay port: %w", err)
+	}
+	if nextPort > relayPortMax {
+		return model.Key{}, fmt.Errorf("no relay port capacity left for that final-exit node (range %d-%d exhausted)", relayPortBase, relayPortMax)
+	}
+
+	row := tx.QueryRow(ctx, `
+		UPDATE keys SET final_exit_node_id = $1, relay_port = $2, updated_at = now()
+		WHERE id = $3 AND deleted_at IS NULL
+		RETURNING `+keyColumns, *finalExitNodeID, nextPort, id)
+	k, err := scanKey(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Key{}, ErrNotFound
+	}
+	if err != nil {
+		return model.Key{}, fmt.Errorf("set key final exit: %w", err)
+	}
+	return k, tx.Commit(ctx)
 }
 
 type ListKeysFilter struct {

@@ -18,6 +18,9 @@ type nodeKeyResponse struct {
 	Token string `json:"token,omitempty"`
 	// E2EEncryption is binding: the node wraps the worker's transport in EncryptedTransport if and only if this is true - previously the node guessed per-peer, making the panel's toggle purely advisory.
 	E2EEncryption bool `json:"e2e_encryption,omitempty"`
+	// RelayHost/RelayPort are set only when this key is cascaded - present means "relay to this address instead of dialing the real internet yourself".
+	RelayHost *string `json:"relay_host,omitempty"`
+	RelayPort *int    `json:"relay_port,omitempty"`
 }
 
 func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +49,42 @@ func (a *App) handleNodeListKeys(w http.ResponseWriter, r *http.Request) {
 			BytesUsedTotal:    k.BytesSentTotal + k.BytesReceivedTotal,
 			Token:             token,
 			E2EEncryption:     k.E2EEncryption,
+			RelayHost:         k.RelayHost,
+			RelayPort:         k.RelayPort,
 		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type relayExitKeyResponse struct {
+	ID string `json:"id"`
+	// Token derives the relay link's own encryption key (see transport.NewUDPRelayTransport) - this node never sees doc_url/doc_urls, since it never talks to Yandex.
+	Token     string `json:"token"`
+	RelayPort int    `json:"relay_port"`
+}
+
+// handleNodeListRelayKeys is the final-exit half of a cascade: keys whose final_exit_node_id is this node - it opens relay_port and, once a relayed packet decrypts, runs a normal raw-mode exit for it exactly like handleNodeListKeys's keys, just fed by the relay link instead of Yandex.
+func (a *App) handleNodeListRelayKeys(w http.ResponseWriter, r *http.Request) {
+	n := nodeFromContext(r.Context())
+
+	keys, err := a.Store.ListActiveRelayExitKeysForNode(r.Context(), n.ID)
+	if err != nil {
+		writeInternalError(w, r, "list relay keys failed", err)
+		return
+	}
+
+	out := make([]relayExitKeyResponse, 0, len(keys))
+	for _, k := range keys {
+		var token string
+		if len(k.TokenEnc) > 0 {
+			if t, err := a.Cipher.Decrypt(k.TokenEnc); err == nil {
+				token = t
+			}
+		}
+		if token == "" {
+			continue
+		}
+		out = append(out, relayExitKeyResponse{ID: k.ID, Token: token, RelayPort: k.RelayPort})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -56,10 +56,12 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("POST /v1/admin/keys/{id}/rotate-token", a.withAdmin(a.handleRotateKeyToken))
 	mux.HandleFunc("POST /v1/admin/keys/{id}/enable", a.withAdmin(a.handleSetKeyEnabled(true)))
 	mux.HandleFunc("POST /v1/admin/keys/{id}/disable", a.withAdmin(a.handleSetKeyEnabled(false)))
+	mux.HandleFunc("PATCH /v1/admin/keys/{id}/final-exit", a.withAdmin(a.handlePatchKeyFinalExit))
 
 	mux.HandleFunc("POST /v1/ingest/keys", a.withIngestToken(a.handleIngestKeys))
 
 	mux.HandleFunc("GET /v1/nodes/keys", a.withNodeToken(a.handleNodeListKeys))
+	mux.HandleFunc("GET /v1/nodes/relay-keys", a.withNodeToken(a.handleNodeListRelayKeys))
 	mux.HandleFunc("POST /v1/nodes/{id}/usage", a.withNodeToken(a.handleNodeUsage))
 	mux.HandleFunc("POST /v1/nodes/{id}/heartbeat", a.withNodeToken(a.handleNodeHeartbeat))
 
