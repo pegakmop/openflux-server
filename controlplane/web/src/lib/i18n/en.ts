@@ -132,6 +132,11 @@ export const en: Dict = {
 	'keys.next': 'Next →',
 	'keys.pages': 'Page {page}',
 	'keys.created': 'Created',
+	'keys.cascade': 'Cascade final exit',
+	'keys.cascadeDirect': 'Direct (no cascade)',
+	'keys.cascadeUpdated': 'Cascade updated',
+	'keys.cascadeNoAddress': "That node has no public address set yet - add one on the Nodes page first.",
+	'keys.cascadeHint': 'Relays this key through a second node instead of exiting directly - see the Nodes page to set a target node\'s public address first.',
 
 	// nodes
 	'nodes.title': 'Nodes',
@@ -148,6 +153,10 @@ export const en: Dict = {
 	'nodes.colKeys': 'Keys',
 	'nodes.colHeartbeat': 'Last activity',
 	'nodes.colCreated': 'Created',
+	'nodes.colPublicAddress': 'Public address',
+	'nodes.publicAddressPh': 'IP or hostname, no port',
+	'nodes.publicAddressSaved': 'Public address saved',
+	'nodes.publicAddressHint': 'Only needed to use this node as a cascade final-exit target.',
 	'nodes.rotate': 'Rotate token',
 	'nodes.rotateConfirmTitle': 'Rotate this node token?',
 	'nodes.rotateConfirmMsg': 'The old token stops working immediately.',

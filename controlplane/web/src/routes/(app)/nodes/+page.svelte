@@ -21,6 +21,7 @@
 	let nodes = $state<NodeDTO[]>([]);
 	let loading = $state(false);
 	let busyKey = $state('');
+	let addressDrafts = $state<Record<string, string>>({});
 
 	function errText(e: unknown): string {
 		if (e instanceof ApiError) {
@@ -34,11 +35,29 @@
 		loading = true;
 		try {
 			nodes = await api.listNodes();
+			for (const n of nodes) {
+				if (!(n.ID in addressDrafts)) addressDrafts[n.ID] = n.PublicAddress ?? '';
+			}
 		} catch (e) {
 			toast.error(errText(e));
 			nodes = [];
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function saveAddress(node: NodeDTO) {
+		const value = (addressDrafts[node.ID] ?? '').trim();
+		if (value === (node.PublicAddress ?? '')) return;
+		busyKey = node.ID;
+		try {
+			await api.patchNode(node.ID, { public_address: value });
+			toast.ok(t('nodes.publicAddressSaved'));
+			await load();
+		} catch (e) {
+			toast.error(errText(e));
+		} finally {
+			busyKey = '';
 		}
 	}
 
@@ -142,6 +161,7 @@
 						<th class="num">{t('nodes.colKeys')}</th>
 						<th>{t('nodes.colHeartbeat')}</th>
 						<th>{t('nodes.colCreated')}</th>
+						<th title={t('nodes.publicAddressHint')}>{t('nodes.colPublicAddress')}</th>
 						<th></th>
 					</tr>
 				</thead>
@@ -170,6 +190,18 @@
 							<td class="text-xs text-[var(--of-muted)]">{formatDate(node.LastHeartbeatAt, i18n.lang)}</td>
 							<td class="text-xs text-[var(--of-muted)]">{formatDate(node.CreatedAt, i18n.lang)}</td>
 							<td>
+								<div class="flex items-center gap-1.5">
+									<input
+										class="input h-8 text-xs"
+										placeholder={t('nodes.publicAddressPh')}
+										bind:value={addressDrafts[node.ID]}
+										onblur={() => saveAddress(node)}
+										onkeydown={(e) => e.key === 'Enter' && saveAddress(node)}
+										disabled={busyKey === node.ID}
+									/>
+								</div>
+							</td>
+							<td>
 								<button
 									type="button"
 									class="of-iconbtn"
@@ -183,7 +215,7 @@
 						</tr>
 					{:else}
 						<tr>
-							<td colspan="7" class="py-8 text-center text-[var(--of-muted)]">
+							<td colspan="8" class="py-8 text-center text-[var(--of-muted)]">
 								{loading ? t('generic.loading') : t('nodes.empty')}
 							</td>
 						</tr>

@@ -130,6 +130,11 @@ export const ru = {
 	'keys.next': 'Вперёд →',
 	'keys.pages': 'Страница {page}',
 	'keys.created': 'Создан',
+	'keys.cascade': 'Каскад — финальный выход',
+	'keys.cascadeDirect': 'Напрямую (без каскада)',
+	'keys.cascadeUpdated': 'Каскад обновлён',
+	'keys.cascadeNoAddress': 'У этой ноды ещё не задан публичный адрес — сначала укажи его на странице «Ноды».',
+	'keys.cascadeHint': 'Трафик ключа пойдёт через вторую ноду вместо прямого выхода — сначала укажи публичный адрес нужной ноды на странице «Ноды».',
 
 	// nodes
 	'nodes.title': 'Ноды',
@@ -146,6 +151,10 @@ export const ru = {
 	'nodes.colKeys': 'Ключи',
 	'nodes.colHeartbeat': 'Последняя активность',
 	'nodes.colCreated': 'Создана',
+	'nodes.colPublicAddress': 'Публичный адрес',
+	'nodes.publicAddressPh': 'IP или домен, без порта',
+	'nodes.publicAddressSaved': 'Публичный адрес сохранён',
+	'nodes.publicAddressHint': 'Нужен, только чтобы использовать эту ноду как финальный выход каскада.',
 	'nodes.rotate': 'Обновить токен',
 	'nodes.rotateConfirmTitle': 'Обновить токен ноды?',
 	'nodes.rotateConfirmMsg': 'Старый токен перестанет работать немедленно.',

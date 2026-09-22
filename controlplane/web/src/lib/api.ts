@@ -14,6 +14,7 @@ export interface NodeDTO {
 	LastHeartbeatAt: string | null;
 	CreatedAt: string;
 	ActiveKeys: number;
+	PublicAddress: string | null;
 }
 
 export interface KeyDTO {
@@ -34,6 +35,8 @@ export interface KeyDTO {
 	CreatedAt: string;
 	UpdatedAt: string;
 	LastSeenAt: string | null;
+	FinalExitNodeID: string | null;
+	RelayPort: number | null;
 }
 
 export type KeyStatus = 'active' | 'disabled' | 'over_quota' | 'expired';
@@ -175,6 +178,8 @@ export const api = {
 	createNode: (name: string, maxKeys: number) =>
 		request<CreateNodeResult>('POST', '/v1/admin/nodes', { name, max_keys: maxKeys }),
 	rotateNodeToken: (id: string) => request<{ token: string }>('POST', `/v1/admin/nodes/${id}/rotate-token`),
+	patchNode: (id: string, body: { max_keys?: number; public_address?: string }) =>
+		request('PATCH', `/v1/admin/nodes/${id}`, body),
 
 	// keys
 	listKeys: (params: { owner_ref?: string; limit?: number; offset?: number } = {}) => {
@@ -201,6 +206,8 @@ export const api = {
 		request<RotateKeyResult>('POST', `/v1/admin/keys/${id}/rotate-token`),
 	patchKeyLimit: (id: string, limitBytes: number | null) =>
 		request('PATCH', `/v1/admin/keys/${id}`, { traffic_limit_bytes: limitBytes }),
+	patchKeyFinalExit: (id: string, finalExitNodeId: string | null) =>
+		request<KeyDTO>('PATCH', `/v1/admin/keys/${id}/final-exit`, { final_exit_node_id: finalExitNodeId }),
 	deleteKey: (id: string) => request<null>('DELETE', `/v1/admin/keys/${id}`),
 	keyUsage: (id: string, days: number) =>
 		request<UsageDayDTO[]>('GET', `/v1/admin/keys/${id}/usage?days=${days}`),

@@ -5,6 +5,7 @@
 		Search,
 		QrCode,
 		Pencil,
+		Route,
 		RotateCcw,
 		Trash2,
 		ToggleLeft,
@@ -20,6 +21,7 @@
 		bytesUsed,
 		type KeyDTO,
 		type KeyStatus,
+		type NodeDTO,
 		type CreateKeyResult,
 		type RotateKeyResult
 	} from '$lib/api';
@@ -79,6 +81,15 @@
 	let limitInput = $state('');
 	let limitBusy = $state(false);
 
+	// cascade modal
+	let nodes = $state<NodeDTO[]>([]);
+	let cascadeKey = $state<KeyDTO | null>(null);
+	let cascadeSelection = $state('');
+	let cascadeBusy = $state(false);
+	const cascadeTargets = $derived(
+		nodes.filter((n) => n.PublicAddress && n.ID !== cascadeKey?.AssignedNodeID)
+	);
+
 	function errText(e: unknown): string {
 		if (e instanceof ApiError) {
 			if (e.message === 'network_error') return t('generic.error');
@@ -103,9 +114,18 @@
 		}
 	}
 
+	async function loadNodes() {
+		try {
+			nodes = await api.listNodes();
+		} catch {
+			nodes = [];
+		}
+	}
+
 	$effect(() => {
 		if (!browser) return;
 		loadKeys();
+		loadNodes();
 	});
 
 	$effect(() => {
@@ -201,6 +221,33 @@
 			.catch((e) => toast.error(errText(e)))
 			.finally(() => {
 				limitBusy = false;
+			});
+	}
+
+	function openCascade(k: KeyDTO) {
+		cascadeKey = k;
+		cascadeSelection = k.FinalExitNodeID ?? '';
+	}
+
+	function saveCascade() {
+		if (!cascadeKey || cascadeBusy) return;
+		cascadeBusy = true;
+		api
+			.patchKeyFinalExit(cascadeKey.ID, cascadeSelection || null)
+			.then(async () => {
+				toast.ok(t('keys.cascadeUpdated'));
+				cascadeKey = null;
+				await loadKeys();
+			})
+			.catch((e) => {
+				if (e instanceof ApiError && e.status === 409) {
+					toast.error(t('keys.cascadeNoAddress'));
+				} else {
+					toast.error(errText(e));
+				}
+			})
+			.finally(() => {
+				cascadeBusy = false;
 			});
 	}
 
@@ -415,6 +462,14 @@
 									</button>
 									<button
 										type="button"
+										class="of-iconbtn {k.FinalExitNodeID ? '!text-[var(--of-accent)]' : ''}"
+										title={t('keys.cascade')}
+										onclick={() => openCascade(k)}
+									>
+										<Route class="h-4 w-4" />
+									</button>
+									<button
+										type="button"
 										class="of-iconbtn"
 										title={t('keys.rotate')}
 										onclick={() => confirmRotate(k)}
@@ -470,6 +525,32 @@
 			</Button>
 			<Button size="sm" variant="primary" onclick={saveLimit} disabled={limitBusy}>
 				{limitBusy ? t('generic.loading') : t('generic.confirm')}
+			</Button>
+		{/snippet}
+	</Modal>
+
+	<!-- Cascade modal -->
+	<Modal
+		open={!!cascadeKey}
+		title={t('keys.cascade')}
+		onClose={() => (cascadeKey = null)}
+	>
+		<p class="mb-3 text-xs text-[var(--of-muted)]">{t('keys.cascadeHint')}</p>
+		<label class="block">
+			<span class="mb-1.5 block text-xs font-medium text-[var(--of-muted)]">{t('keys.cascade')}</span>
+			<select class="input" bind:value={cascadeSelection}>
+				<option value="">{t('keys.cascadeDirect')}</option>
+				{#each cascadeTargets as n (n.ID)}
+					<option value={n.ID}>{n.Name}</option>
+				{/each}
+			</select>
+		</label>
+		{#snippet footer()}
+			<Button size="sm" onclick={() => (cascadeKey = null)} disabled={cascadeBusy}>
+				{t('generic.cancel')}
+			</Button>
+			<Button size="sm" variant="primary" onclick={saveCascade} disabled={cascadeBusy}>
+				{cascadeBusy ? t('generic.loading') : t('generic.confirm')}
 			</Button>
 		{/snippet}
 	</Modal>
