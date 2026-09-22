@@ -67,6 +67,29 @@ fragments: `controlplane/web/deploy/` (systemd unit, Nginx location, env templat
 New keys are best-effort auto-assigned to whichever active node currently has spare capacity
 (`max_keys`), so you scale by registering more nodes, not by growing one process.
 
+## Cascades (two-hop exit)
+
+A key normally exits straight from its assigned node. It can instead exit through a *second*
+node instead: client → Yandex Docs (disguised) → entry node → fast encrypted UDP link → final-exit
+node → real internet. Only the client-facing hop needs to look like something else - the two nodes
+are both yours, so the link between them is plain (if still encrypted) UDP instead of paying Yandex's
+disguise overhead a second time. Typical use: an entry node inside a heavily-filtered network,
+final-exiting through a node elsewhere.
+
+To set one up:
+1. Register both nodes normally (same flow either way - nothing marks a node as "entry" or
+   "final-exit" ahead of time, that's decided per key below).
+2. On the **Nodes** page, set the final-exit node's **public address** (its own IP or hostname, no
+   port) - a node only ever calls out to this controlplane, so there's no other way to learn it.
+3. On the **Keys** page, open a key's cascade control and pick that node as its final exit. This
+   allocates a dedicated UDP port for the link (a small 41000-41999 range, separate from raw mode's
+   own per-key port allocation) and both nodes pick it up on their next poll.
+
+Not supported yet: combining a cascade with `e2e_encryption` on the same key (the final-exit node
+would need to own the E2E unwrap instead of the entry node, and that boundary isn't wired up) - the
+entry node refuses to start that key rather than getting it wrong. Usage accounting is unaffected
+either way: it's still measured on the entry node's client-facing side, so nothing double-counts.
+
 ## API walkthrough
 
 ```bash
